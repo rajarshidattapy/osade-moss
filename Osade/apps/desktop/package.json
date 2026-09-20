@@ -1,0 +1,30 @@
+{
+  "name": "@osade/desktop",
+  "productName": "Osade",
+  "version": "0.0.0",
+  "private": true,
+  "main": "dist/main/electron.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "pnpm build:main && pnpm build:renderer",
+    "start": "pnpm --filter @osade/daemon build && pnpm build && electron .",
+    "smoke": "pnpm --filter @osade/daemon build && pnpm build && cross-env OSADE_HOME=.smoke OSADE_SMOKE_SHOT=smoke.png electron .",
+    "smoke:panels": "pnpm --filter @osade/daemon build && pnpm build && pnpm --filter @osade/daemon exec vite-node scripts/seed-smoke-fixture.mjs ../../apps/desktop/.smoke && cross-env OSADE_HOME=.smoke OSADE_SMOKE_SHOT=smoke.png OSADE_SMOKE_CLICK=[data-task-id] OSADE_SMOKE_EXPECT=\"Retry the flaky poller test|Needs your approval|This leaves your machine|Open pull request|osade/retry-flaky-poller|Approving binds this exact text|Chat|Files|Checks|Diff|Rules\" electron ."
+  },
+  "dependencies": {
+    "@osade/contract": "workspace:*",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^6.0.5"
+  }
+}

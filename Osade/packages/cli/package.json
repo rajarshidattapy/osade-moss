@@ -1,0 +1,19 @@
+{
+  "name": "@osade/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "osade": "./dist/bin.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node ../../scripts/bundle.mjs . src/bin.ts dist/bin.js"
+  },
+  "dependencies": {
+    "@osade/contract": "workspace:*"
+  },
+  "devDependencies": {
+    "@osade/daemon": "workspace:*"
+  }
+}

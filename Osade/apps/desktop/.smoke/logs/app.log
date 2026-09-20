@@ -1,0 +1,65 @@
+2026-09-14T15:00:07.981Z boot: adopting or spawning the substrate
+2026-09-14T15:00:08.368Z [substrate] spawned a detached substrate server on session "osade"
+2026-09-14T15:00:08.374Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-14T15:00:09.104Z [daemon] spawned the osade daemon on 127.0.0.1:50892
+2026-09-14T15:00:09.105Z boot: creating the window
+2026-09-14T15:00:11.983Z [smoke] all 2 phrases laid out, sized and on the page
+2026-09-14T15:00:12.169Z [smoke] wrote C:/Users/asus/AppData/Local/Temp/claude/C--Users-asus-Desktop-proj-OsadeOSS-Osade/454738e7-91a4-41fa-9602-4c43e4e833f9/scratchpad/devmode.png (29583 bytes)
+2026-09-14T15:00:12.172Z [smoke] stopped the daemon this run started
+2026-09-14T15:00:12.192Z the window closed
+2026-09-14T17:41:01.895Z boot: adopting or spawning the substrate
+2026-09-14T17:41:02.347Z [substrate] spawned a detached substrate server on session "osade"
+2026-09-14T17:41:02.351Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-14T17:41:05.546Z [daemon] spawned the osade daemon on 127.0.0.1:56644
+2026-09-14T17:41:05.548Z boot: creating the window
+2026-09-14T17:41:11.315Z [smoke] wrote smoke.png (50678 bytes)
+2026-09-14T17:41:11.318Z [smoke] renderer error: absent: Nothing leaves this machine until you say so.
+2026-09-14T17:41:11.323Z [smoke] stopped the daemon this run started
+2026-09-14T17:41:11.423Z the window closed
+2026-09-14T17:44:14.984Z boot: adopting or spawning the substrate
+2026-09-14T17:44:15.099Z [substrate] adopted the running substrate server on session "osade"
+2026-09-14T17:44:15.104Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-14T17:44:16.231Z [daemon] spawned the osade daemon on 127.0.0.1:56540
+2026-09-14T17:44:16.232Z boot: creating the window
+2026-09-14T17:44:20.844Z [smoke] all 10 phrases laid out, sized and on the page
+2026-09-14T17:44:20.922Z [smoke] wrote smoke.png (54664 bytes)
+2026-09-14T17:44:20.923Z [smoke] stopped the daemon this run started
+2026-09-14T17:44:20.951Z the window closed
+2026-09-14T18:18:02.830Z boot: adopting or spawning the substrate
+2026-09-14T18:18:02.936Z [substrate] adopted the running substrate server on session "osade"
+2026-09-14T18:18:02.937Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-14T18:18:03.468Z [daemon] spawned the osade daemon on 127.0.0.1:51492
+2026-09-14T18:18:03.469Z boot: creating the window
+2026-09-14T18:18:07.624Z [smoke] all 10 phrases laid out, sized and on the page
+2026-09-14T18:18:07.701Z [smoke] wrote smoke.png (63257 bytes)
+2026-09-14T18:18:07.703Z [smoke] stopped the daemon this run started
+2026-09-14T18:18:07.736Z the window closed
+2026-09-15T03:38:37.156Z boot: adopting or spawning the substrate
+2026-09-15T03:38:37.456Z [substrate] spawned a detached substrate server on session "osade"
+2026-09-15T03:38:37.457Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-15T03:38:38.215Z [daemon] spawned the osade daemon on 127.0.0.1:61170
+2026-09-15T03:38:38.215Z boot: creating the window
+2026-09-15T03:38:38.963Z renderer loaded
+2026-09-15T03:38:41.084Z [smoke] wrote smoke.png (20477 bytes)
+2026-09-15T03:38:41.085Z [smoke] stopped the daemon this run started
+2026-09-15T03:38:41.094Z the window closed
+2026-09-15T04:11:12.673Z boot: adopting or spawning the substrate
+2026-09-15T04:11:12.781Z [substrate] adopted the running substrate server on session "osade"
+2026-09-15T04:11:12.783Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-15T04:11:13.553Z [daemon] spawned the osade daemon on 127.0.0.1:64262
+2026-09-15T04:11:13.554Z boot: creating the window
+2026-09-15T04:11:14.099Z renderer loaded
+2026-09-15T04:11:17.724Z [smoke] wrote smoke.png (64778 bytes)
+2026-09-15T04:11:17.724Z [smoke] renderer error: absent: Nothing leaves this machine until you say so.
+2026-09-15T04:11:17.725Z [smoke] stopped the daemon this run started
+2026-09-15T04:11:17.745Z the window closed
+2026-09-15T04:12:05.501Z boot: adopting or spawning the substrate
+2026-09-15T04:12:05.609Z [substrate] adopted the running substrate server on session "osade"
+2026-09-15T04:12:05.611Z boot: daemon entry C:\Users\asus\Desktop\proj\OsadeOSS\Osade\packages\daemon\dist\cli.js
+2026-09-15T04:12:06.629Z [daemon] spawned the osade daemon on 127.0.0.1:64285
+2026-09-15T04:12:06.630Z boot: creating the window
+2026-09-15T04:12:07.485Z renderer loaded
+2026-09-15T04:12:11.060Z [smoke] all 10 phrases laid out, sized and on the page
+2026-09-15T04:12:11.110Z [smoke] wrote smoke.png (64778 bytes)
+2026-09-15T04:12:11.111Z [smoke] stopped the daemon this run started
+2026-09-15T04:12:11.127Z the window closed

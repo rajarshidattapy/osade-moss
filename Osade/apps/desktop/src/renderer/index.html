@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      OSADE.md §2.1 — loopback only, and nothing else.
+
+      The renderer talks to exactly one thing: the daemon on 127.0.0.1, over HTTP for procedures
+      and a websocket for the ledger. The port is chosen at boot, so it is a wildcard; the host
+      is not. Everything else — a remote script, a font from a CDN, an avatar from a repository —
+      is refused by the browser rather than by review.
+
+      `'unsafe-inline'` for styles only, because components carry inline `style` objects. There
+      is no `'unsafe-eval'` and no remote `script-src`, so text that reaches the renderer from a
+      pull request — a mined rule, a reviewer's comment, an agent's activity line — still cannot
+      execute as code.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self' 'unsafe-inline';
+               img-src 'self' data:;
+               font-src 'self';
+               connect-src http://127.0.0.1:* ws://127.0.0.1:*;
+               form-action 'none';
+               base-uri 'none';
+               object-src 'none'"
+    />
+    <title>Osade</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,319 @@
+/*
+ * Design tokens — OSADE.md §19.2.
+ *
+ * Dark ground, one blue accent for selection/focus, greyscale otherwise. IBM Plex Mono
+ * throughout (system mono until Plex is bundled). 1px rules, no shadows. 3px radius on
+ * controls only. Sentence case in content; chrome stays quiet.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg-0: #0f1214;
+  --bg-1: #14181b;
+  --bg-2: #1b2025;
+  --bg-3: #22272e;
+  --line: #21262c;
+  --ink: #c9d1d9;
+  --ink-2: #7d868e;
+  --ink-3: #6e7772;
+
+  --st-needs: #d9903f;
+  --st-live: #57a773;
+  --st-fail: #cf6a67;
+  --st-rest: #6e7772;
+  --focus: #58a6ff;
+
+  /* Agent colours — cousins of --st-* / --focus, never the status tokens themselves. */
+  --ag-claude: #6ea0d4;
+  --ag-codex: #5f9e86;
+  --ag-opencode: #c4a06a;
+  --ag-pi: #9a8bb8;
+
+  /* Aliases for panels that still speak the old names. */
+  --paper: var(--bg-0);
+  --surface: var(--bg-1);
+  --field: var(--bg-2);
+  --rule: var(--line);
+  --ink-soft: var(--ink-2);
+  --accent: var(--focus);
+
+  --sans: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+  --mono: var(--sans);
+
+  --t-xs: 11px;
+  --t-s: 12.5px;
+  --t-m: 14px;
+  --t-l: 17px;
+
+  --radius: 3px;
+  --radius-panel: 3px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: var(--t-m);
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+.mono,
+kbd {
+  font-family: var(--mono);
+}
+
+::selection {
+  background: rgba(88, 166, 255, 0.28);
+}
+
+:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 11px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: #30363d;
+}
+
+button:disabled {
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--bg-3);
+  color: var(--ink);
+  border-color: #30363d;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #2a3139;
+}
+
+button.primary:disabled {
+  background: var(--bg-2);
+  color: var(--ink-3);
+  border-color: var(--line);
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  width: 100%;
+}
+
+input:focus,
+textarea:focus {
+  outline: 1px solid var(--focus);
+  outline-offset: 0;
+  border-color: var(--focus);
+}
+
+kbd {
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+summary {
+  list-style: none;
+  color: var(--ink-2);
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+summary::before {
+  content: '› ';
+  color: var(--ink-3);
+}
+
+details[open] > summary::before {
+  content: '⌄ ';
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.branch-tail {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: right;
+  min-width: 0;
+}
+
+.branch-clip {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+
+.branch-clip > span {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.ledger-row:hover {
+  background: var(--bg-3);
+}
+
+.ledger-row[aria-pressed='true'],
+.ledger-row[aria-pressed='true']:hover {
+  background: var(--bg-2);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Dark+ token colours, used only in the Files editor overlay. */
+.tok-kw {
+  color: #569cd6;
+}
+.tok-type {
+  color: #4ec9b0;
+}
+.tok-str {
+  color: #ce9178;
+}
+.tok-com {
+  color: #6a9955;
+}
+.tok-num {
+  color: #b5cea8;
+}
+.tok-fn {
+  color: #dcdcaa;
+}
+.tok-plain {
+  color: #d4d4d4;
+}
+
+.code-editor,
+.code-editor textarea,
+.code-editor pre {
+  font-family: var(--mono);
+  font-size: var(--t-s);
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  word-wrap: normal;
+  overflow-wrap: normal;
+}
+
+.code-editor textarea {
+  resize: none;
+  border: none;
+  border-radius: 0;
+  padding: 12px 16px;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  outline: none;
+}
+
+.code-editor textarea:focus {
+  outline: none;
+  border: none;
+}
+
+.code-editor textarea::selection {
+  background: rgba(88, 166, 255, 0.35);
+  color: transparent;
+}
+
+.diff-add {
+  background: #1a2a1e;
+  color: #b7d9c3;
+}
+.diff-del {
+  background: #2a1a1a;
+  color: #e0a8a6;
+}
+.diff-hunk {
+  background: var(--bg-1);
+  color: #58a6ff;
+}
+.diff-meta {
+  color: var(--ink-3);
+}
+.diff-ctx {
+  color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

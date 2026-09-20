@@ -1,0 +1,30 @@
+{
+  "$comment": "What this tree is: the upstream source at the commit below, established 2026-09-11 by blob hash (all 1766 tracked files identical), with one change applied — scripts/rebrand-source.mjs renames the upstream project name to Osade’s throughout. That script is the statement of change Apache-2.0 section 4(b) asks for; re-run it rather than hand-editing. The API contract comes from vendor/runtime/<version>-p<protocol>/api-schema.json, never from here.",
+  "upstream": "vendor/runtime/0.8.2-p20/pin.json (license.upstream_repository)",
+  "commit": "94f6d9c0d9bb",
+  "committed_at": "2026-09-02",
+  "subject": "fix: reveal newly focused spaces in the sidebar",
+  "verified": {
+    "$comment": "Before the rename.",
+    "method": "git blob sha per file, against the upstream tree at this commit",
+    "files_compared": 1766,
+    "files_identical": 1766,
+    "files_differing": 0
+  },
+  "modified": {
+    "by": "scripts/rebrand-source.mjs",
+    "applied_at": "2026-09-13",
+    "what": "The upstream project name, in every case and in file and directory names, becomes Osade. Where the project lives, and its release, install and update addresses, point at Osade’s repository, so this tree’s installers and self-updater look for Osade’s releases. The release manifests keep only the pinned release. The home and session environment variables take an OSADE_RUNTIME_ prefix instead, so a runtime built from this source cannot read the variables Osade itself sets.",
+    "kept": "The vendored patches’ provenance — the issue and pull-request links saying why each patch to a third-party library exists, and the author addresses in their headers — plus the plugin marketplace’s live API and the upstream organisation’s bare name and other repositories.",
+    "line_numbers": "Unchanged. The rename never adds or removes a line, so citations into backend/ still hold."
+  },
+  "not_from_upstream": {
+    "$comment": "Present here but not in the upstream tree at this commit: the project’s own repo furniture, moved under backend/ on 2026-09-11 so it stops competing with Osade’s at the repo root (PRD-DELTA #14).",
+    "paths": [
+      ".agents/**",
+      ".github/commit-msg",
+      ".github/pre-commit"
+    ]
+  },
+  "relationship_to_the_shipped_binary": "This source is AHEAD of the binary Osade runs, and after the rename it no longer spells its environment variables, sockets or wire values the way that binary does. vendor/runtime/0.8.2-p20 pins the v0.8.2 release, whose checksum is recorded and verified. The binary is the contract; this source explains its behaviour."
+}

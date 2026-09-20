@@ -1,0 +1,58 @@
+{
+  "name": "osade",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OsadeOSS/Osade.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.29.2",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "substrate:codegen": "node scripts/generate-substrate-client.mjs",
+    "substrate:drift": "vite-node packages/daemon/src/cli.ts -- drift",
+    "substrate:codegen:check": "node scripts/generate-substrate-client.mjs --check",
+    "check": "pnpm substrate:codegen:check && pnpm attribution:check && pnpm lint && pnpm -r typecheck && vitest run",
+    "test:e2e": "cross-env OSADE_E2E=1 vitest run packages/daemon/test/e2e",
+    "lint": "eslint .",
+    "attribution": "node scripts/generate-rust-attribution.mjs",
+    "attribution:check": "node scripts/generate-rust-attribution.mjs --check",
+    "substrate:source": "node scripts/fetch-substrate-source.mjs",
+    "package": "node scripts/check-signing.mjs && pnpm -r build && node scripts/make-icon.mjs && node scripts/fetch-node-runtime.mjs && node scripts/fetch-substrate-binaries.mjs && electron-builder --config electron-builder.config.cjs",
+    "package:dir": "pnpm -r build && node scripts/make-icon.mjs && node scripts/fetch-node-runtime.mjs && node scripts/fetch-substrate-binaries.mjs && electron-builder --config electron-builder.config.cjs --dir",
+    "icon": "node scripts/make-icon.mjs",
+    "install-cli": "node scripts/install-cli.mjs",
+    "install-desktop": "node scripts/make-icon.mjs && powershell -File scripts/install-desktop-shortcut.ps1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.10.2",
+    "cross-env": "^10.1.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "json-schema-to-typescript": "^15.0.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.69.0",
+    "vite-node": "^6.0.0",
+    "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "esbuild",
+      "node-pty"
+    ]
+  },
+  "description": "Run coding agents as open-source contributors",
+  "author": "Osade contributors"
+}

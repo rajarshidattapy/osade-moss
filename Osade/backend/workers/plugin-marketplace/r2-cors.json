@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": ["https://osadeoss.github.io"],
+        "methods": ["GET", "HEAD"],
+        "headers": ["*"]
+      },
+      "exposeHeaders": ["Content-Type", "Cache-Control", "ETag"],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}

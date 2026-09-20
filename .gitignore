@@ -1,0 +1,52 @@
+**/target/
+Osade/node_modules/
+**/dist/
+**/build/
+**/vendor/libghostty-vt/zig-pkg/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+inspiration/
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Editor settings
+.vscode/
+.idea/
+
+# docs/ is Osade's spec directory and belongs in the repo.
+# The upstream runtime generates its own docs/ and ignores it — that rule lives in
+# backend/.gitignore and applies to backend/docs only.
+
+/.local/
+/backlog
+
+# Local agent state
+/.pi/todos
+/.pi/issues
+/.pi/cache
+/result
+/result-*
+
+/.wrangler/
+**/.wrangler/
+apps/desktop/smoke.png
+apps/desktop/.smoke/
+vendor/runtime/*/x86_64-*/
+vendor/runtime/*/aarch64-*/
+packages/*/dist/
+vendor/node/
+release/

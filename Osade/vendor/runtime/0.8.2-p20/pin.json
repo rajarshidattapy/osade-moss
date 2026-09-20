@@ -1,0 +1,95 @@
+{
+  "$comment": "The pinned substrate target. api-schema.json in this directory is the ONLY permitted source for substrate client codegen (OSADE.md \u00a74.1). backend/ is reference reading for behaviour, never for API derivation.",
+  "substrate": {
+    "version": "0.8.2",
+    "protocol": 20,
+    "schema_version": 1,
+    "method_count": 91,
+    "endpoint_protocol_generation": null
+  },
+  "identity": {
+    "$comment": "The substrate's version string is NOT a contract. Two builds both report 0.8.2 with different protocols and a 10-method gap (PRD-DELTA #1). The identity of a substrate target is the tuple (protocol, method set), and the version string is a label. Directory names are <version>-p<protocol> for that reason.",
+    "key": "0.8.2-p20",
+    "compare_on": [
+      "protocol",
+      "method_set"
+    ],
+    "never_compare_on": [
+      "version"
+    ]
+  },
+  "schema": {
+    "path": "api-schema.json",
+    "sha256": "050dd7f06aecdc6da085fea946ed1aaa7290c6f9f746716288af94e485c315e9",
+    "captured_with": "osade-runtime api schema --json",
+    "captured_at": "2026-09-04",
+    "method_list": "methods.txt"
+  },
+  "binary": {
+    "$comment": "Release assets for v0.8.2, hashed from what GitHub actually serves. NOT committed - ~91 MB of binaries do not belong in git. `node scripts/fetch-substrate-binaries.mjs` downloads and verifies against these. CONFIRMED 2026-09-11: the Windows binary inside the zip hashes to the value the schema was captured from, so the pinned schema comes from the genuine release build - while backend/ source is AHEAD of v0.8.2 (ADR 0002). Binary and source are pinned to different things, deliberately and now provably. `{project}` in asset names is filled by the fetch script; after verify the file is renamed to osade-runtime.",
+    "vendored": false,
+    "$comment_env_prefix": "The prefix of the environment variables the pinned executable reads (<prefix>_SOCKET_PATH, <prefix>_SESSION, <prefix>_STARTUP_CWD...). This is the BINARY's input contract and must never be derived from license.upstream_repository: that field carries Osade's rebranded identity, while the shipped release binary still reads its original names. Confirmed 2026-09-20 by scanning the pinned Windows executable: it contains HERDR_* names and zero OSADE_* names. Deriving this from the repository URL makes the supervisor pass overrides the runtime ignores, so it listens elsewhere and boot fails the ping with no diagnostic.",
+    "env_prefix": "HERDR",
+    "release_tag": "v0.8.2",
+    "expected_layout": "vendor/runtime/<version>-p<protocol>/<target>/osade-runtime[.exe]",
+    "assets": {
+      "{project}-linux-aarch64": {
+        "target": "aarch64-unknown-linux-gnu",
+        "sha256": "f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d"
+      },
+      "{project}-linux-x86_64": {
+        "target": "x86_64-unknown-linux-gnu",
+        "sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
+      },
+      "{project}-macos-aarch64": {
+        "target": "aarch64-apple-darwin",
+        "sha256": "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574"
+      },
+      "{project}-macos-x86_64": {
+        "target": "x86_64-apple-darwin",
+        "sha256": "ab50262c8190cd7aa9056d249d255c08c328c3e8716de9cfa29db4f131b8e2c1"
+      },
+      "{project}-windows-x86_64.zip": {
+        "target": "x86_64-pc-windows-msvc",
+        "sha256": "0ab3d0fe1434d55757997542b978c771d642987bb15a7130f4160f0db38821d5",
+        "contains": {
+          "{project}.exe": "467682cdb5fa482c54897c6b9c96a5300a3516a72ef70ec3d009e16fadb131b3"
+        }
+      }
+    },
+    "third_party": {
+      "$comment": "The Windows zip ships notices for ConPTY only, copied into third-party/. Rust crate attribution is NOT in the release - see RUST-CRATES.md, generated from the pinned Cargo.lock.",
+      "path": "third-party/"
+    },
+    "verify_at_boot": "A matching checksum is not the only gate. Run the boot drift check (OSADE.md 4.1.1) regardless: a different runtime may be on PATH."
+  },
+  "license": {
+    "$comment": "The runtime is Apache-2.0. LICENSE is the file from the pinned tag, byte for byte, so attribution does not depend on the network or on backend/ still being present. There is NO NOTICE file upstream (NOTICE at the pinned tag of license.upstream_repository is 404), so Apache-2.0 section 4(d) has nothing to propagate - recorded here so nobody re-checks, and so nobody writes one.",
+    "spdx": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "source": "LICENSE at tag v0.8.2 of license.upstream_repository",
+    "fetched_at": "2026-09-11",
+    "notice_file": null,
+    "upstream_repository": "https://github.com/OsadeOSS/Osade",
+    "upstream_website": "https://github.com/OsadeOSS/Osade"
+  },
+  "known_gaps": {
+    "$comment": "Methods present in backend/src/api/schema.rs but absent from this pinned schema. Calling any of these against this target returns invalid_request. See PRD-DELTA #1.",
+    "absent_from_this_target": [
+      "command.invoke",
+      "integration.list",
+      "pane.copy_motion",
+      "pane.copy_search",
+      "pane.edit_scrollback",
+      "pane.link.activate",
+      "pane.scroll",
+      "pane.selection.read",
+      "product_announcement.dismiss",
+      "release_notes.dismiss"
+    ],
+    "capabilities_absent": [
+      "endpoint_protocol_generation"
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@osade/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node ../../scripts/bundle.mjs . src/cli.ts dist/cli.js"
+  },
+  "dependencies": {
+    "@osade/contract": "workspace:*",
+    "@trpc/server": "^11.18.0",
+    "better-sqlite3": "^11.7.0",
+    "node-pty": "^1.1.0",
+    "octokit": "^4.1.4",
+    "ws": "^8.21.3",
+    "yaml": "^2.9.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/ws": "^8.18.1"
+  }
+}
