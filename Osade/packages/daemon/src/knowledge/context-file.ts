@@ -28,6 +28,23 @@ export interface ContextFileInput {
   verifySteps: readonly { name: string; cmd: string }[];
   /** Rules that were active but did not fit the cap, so the UI can surface them. */
   overflow?: number;
+  /** OSADE-MOSS §M.5.6 — present only on a migration lane. */
+  migration?: MigrationBrief;
+}
+
+/**
+ * The two sections §M.5.6 adds to a migration lane's context file.
+ *
+ * `sites` is deliberately labelled as *candidates* in the rendered text. Discovery maximises
+ * recall and is explicitly not an answer (§M.5.5), so a context file that presented the list as
+ * "the call sites" would undo the one guarantee the two-stage design provides — the agent has
+ * to confirm or reject each one, and verification is the arbiter.
+ */
+export interface MigrationBrief {
+  packageName: string;
+  toVersion: string;
+  changes: readonly { kind: string; description: string; evidence: string; oldSymbol: string | null; newSymbol: string | null }[];
+  sites: readonly { file: string; line: number; via: string; score: number | null }[];
 }
 
 export interface RenderedContext {
@@ -58,6 +75,8 @@ export function renderContextFile(input: ContextFileInput): RenderedContext {
     '',
   ];
 
+  const migration = input.migration ? renderMigration(input.migration) : [];
+
   const verify =
     input.verifySteps.length === 0
       ? []
@@ -68,13 +87,15 @@ export function renderContextFile(input: ContextFileInput): RenderedContext {
         ];
 
   // Everything except the rules is non-negotiable, so the rules get whatever budget is left.
-  const fixed = [...header, ...verify, ...footer].join('\n');
+  // The migration brief counts as fixed: §M.5.6's changes and candidate sites are the task, not
+  // advice about it, and squeezing them out to fit more conventions would invert the priority.
+  const fixed = [...header, ...migration, ...verify, ...footer].join('\n');
   const budget = MAX_INJECTED_TOKENS - estimateTokens(fixed);
 
   const pasted = input.rulesText?.trim() ?? '';
   if (pasted.length > 0) {
     const rules = ['## Rules this project enforces', '', pasted, ''];
-    const body = [...header, ...rules, ...verify, ...footer].join('\n');
+    const body = [...header, ...migration, ...rules, ...verify, ...footer].join('\n');
     return {
       body,
       included: 1,
@@ -104,7 +125,7 @@ export function renderContextFile(input: ContextFileInput): RenderedContext {
       ? []
       : ['## Rules this project enforces', '', ...rendered, ''];
 
-  const body = [...header, ...rules, ...verify, ...footer].join('\n');
+  const body = [...header, ...migration, ...rules, ...verify, ...footer].join('\n');
 
   return {
     body,
@@ -141,4 +162,42 @@ function citation(e: Evidence): string {
 function fileName(url: string): string {
   const last = url.split('?')[0]?.split('#')[0]?.split('/').pop();
   return last && last.length > 0 ? last : url;
+}
+
+/** §M.5.6 — the changes with their evidence, and the candidate sites with their caveat. */
+function renderMigration(brief: MigrationBrief): string[] {
+  const lines = [`## Migrating ${brief.packageName} to ${brief.toVersion}`, ''];
+
+  lines.push('### Changes to apply');
+  for (const change of brief.changes) {
+    const rename =
+      change.oldSymbol != null
+        ? ` (\`${change.oldSymbol}\` → \`${change.newSymbol ?? 'removed'}\`)`
+        : '';
+    lines.push(`- **${change.kind}**: ${change.description}${rename}`);
+    // The changelog line it came from, so the agent can check the instruction rather than
+    // take it on faith — the same reason conventions travel with their evidence (§13.1).
+    lines.push(`  <sub>changelog: ${collapse(change.evidence)}</sub>`);
+  }
+
+  if (brief.sites.length > 0) {
+    lines.push('', '### Candidate call sites');
+    lines.push(
+      'These were found by search and **may be wrong or incomplete**. Confirm or reject each',
+      'one against the code. Do not assume the list is exhaustive.',
+      '',
+    );
+    for (const site of brief.sites) {
+      const score = site.score == null ? '' : ` score ${site.score.toFixed(2)}`;
+      lines.push(`- \`${site.file}:${site.line}\` (via ${site.via}${score})`);
+    }
+  }
+
+  lines.push('');
+  return lines;
+}
+
+function collapse(text: string): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > 160 ? `${one.slice(0, 159)}…` : one;
 }

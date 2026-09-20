@@ -87,7 +87,12 @@ export function isNeedsYou(status: TaskStatus): boolean {
   return NEEDS_YOU.has(status);
 }
 
-export const TaskOriginKind = z.enum(['issue', 'manual', 'triage', 'followup']);
+/**
+ * `api_migration` is F1's origin (OSADE-MOSS §M.5.6). It is a new *kind*, not new
+ * orchestration: a migration lane is created through the same `LaunchTask` path as every other
+ * lane, and this field is how the ledger can say where it came from.
+ */
+export const TaskOriginKind = z.enum(['issue', 'manual', 'triage', 'followup', 'api_migration']);
 export type TaskOriginKind = z.infer<typeof TaskOriginKind>;
 
 export const PrState = z.enum(['open', 'closed', 'merged']);

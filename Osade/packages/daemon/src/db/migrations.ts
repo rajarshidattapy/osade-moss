@@ -23,7 +23,7 @@ const CORE_CDC_TABLES = [
   'turn_checkpoint',
 ] as const;
 
-export const CDC_TABLES = [...CORE_CDC_TABLES, 'chat_turn'] as const;
+export const CDC_TABLES = [...CORE_CDC_TABLES, 'chat_turn', 'context_pack'] as const;
 
 export type CdcTable = (typeof CDC_TABLES)[number];
 
@@ -444,6 +444,344 @@ CREATE TRIGGER memory_au AFTER UPDATE ON memory BEGIN
 END;
 `;
 
+/**
+ * Tables the retrieval indexer projects into Moss — OSADE-MOSS §M.1.4.
+ *
+ * Only tables that exist at migration 12. `policy_clause`, `code_chunk` and `pr_record` join
+ * this list with the migrations that create them (14–16); a namespace with no source table
+ * simply indexes nothing, which is why the port can ship before the features behind it.
+ */
+export const RETRIEVAL_TABLES = [
+  'chat_turn',
+  'gate_request',
+  'verify_run',
+  'agent_fact',
+  'convention',
+  'convention_evidence',
+  // Migration 14. F1's chunks reach the `code` namespace the same way everything else reaches
+  // its own: as rows, through the one indexer (R1). Nothing in F1 writes to Moss directly.
+  'code_chunk',
+  // Migration 16 — F4's clauses, into the `policies` namespace.
+  'policy_clause',
+  // Migration 17 — F1's verified fixes, into `turns` with verified = '1'.
+  'fix_pattern',
+] as const;
+
+/**
+ * The subset that existed when migration 12 ran.
+ *
+ * A migration is a statement about a schema at a point in time, so it cannot be generated from
+ * a list that later grows: adding `code_chunk` to `RETRIEVAL_TABLES` would otherwise make
+ * migration 12 try to put a trigger on a table three migrations away from existing, and every
+ * fresh database would fail to boot. Each later table brings its own triggers with it.
+ */
+const M012_TRIGGER_TABLES = [
+  'chat_turn',
+  'gate_request',
+  'verify_run',
+  'agent_fact',
+  'convention',
+  'convention_evidence',
+] as const;
+
+export type RetrievalTable = (typeof RETRIEVAL_TABLES)[number];
+
+/**
+ * §M.1.4 — why `change_log` could not be reused.
+ *
+ * `change_log.row_id` is the *task* a change belongs to, because it exists to push `TaskView`s
+ * (ARCH §6.2). The indexer needs the row's own key to re-read and re-project it, and it needs
+ * rows for tables that have no task at all (conventions, and later policies). It is also pruned
+ * to 50 000 rows, which the indexer's cursor cannot tolerate. So: a second log, its own cursor,
+ * pruned only up to what has been consumed.
+ */
+function retrievalTriggers(table: RetrievalTable): string {
+  const key = table === 'agent_fact' ? 'task_id' : 'id';
+  // §M.1.4 — activity text churns at ~1 Hz and would bury real events in the `turns`
+  // namespace, so agent_fact reaches the index on transitions only.
+  const gate =
+    table === 'agent_fact'
+      ? `WHEN NEW.last_event IN ('to_review', 'to_in_progress') OR NEW.terminated = 1 OR NEW.external_block IS NOT NULL`
+      : '';
+  return `
+CREATE TRIGGER ${table}_ret_insert AFTER INSERT ON ${table} ${gate} BEGIN
+  INSERT INTO retrieval_log (table_name, row_id, op, at)
+  VALUES ('${table}', NEW.${key}, 'insert', CAST(strftime('%s','now') AS INTEGER) * 1000);
+END;
+
+CREATE TRIGGER ${table}_ret_update AFTER UPDATE ON ${table} ${gate} BEGIN
+  INSERT INTO retrieval_log (table_name, row_id, op, at)
+  VALUES ('${table}', NEW.${key}, 'update', CAST(strftime('%s','now') AS INTEGER) * 1000);
+END;
+
+CREATE TRIGGER ${table}_ret_delete AFTER DELETE ON ${table} BEGIN
+  INSERT INTO retrieval_log (table_name, row_id, op, at)
+  VALUES ('${table}', OLD.${key}, 'delete', CAST(strftime('%s','now') AS INTEGER) * 1000);
+END;
+`;
+}
+
+/**
+ * M12 — the retrieval layer (§M.1) and the per-turn context pack (§M.2).
+ *
+ * `retrieval_doc` is the FTS5 adapter's storage *and* the doc-count source for stats. It is a
+ * derived table like everything else under R1: `osade index rebuild` truncates it and
+ * re-projects from the fact tables, and nothing reads it as truth.
+ *
+ * It deliberately carries no CDC triggers. The index changing is not a fact about a task, and
+ * putting index churn on the one event path would push a message to every client on every
+ * agent turn.
+ */
+const M012_RETRIEVAL = `
+CREATE TABLE retrieval_log (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  table_name TEXT NOT NULL,
+  row_id     TEXT NOT NULL,     -- the row's own key, NOT the task id
+  op         TEXT NOT NULL,     -- 'insert' | 'update' | 'delete'
+  at         INTEGER NOT NULL
+);
+CREATE INDEX retrieval_log_seq_idx ON retrieval_log(seq);
+
+CREATE TABLE retrieval_cursor (
+  consumer TEXT PRIMARY KEY,    -- 'indexer'
+  last_seq INTEGER NOT NULL
+);
+
+-- The FTS5 fallback's store (§M.1.2). Same documents, same ids, same metadata as Moss.
+CREATE TABLE retrieval_doc (
+  id         TEXT PRIMARY KEY,
+  ns         TEXT NOT NULL,
+  text       TEXT NOT NULL,
+  meta_json  TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX retrieval_doc_ns_idx ON retrieval_doc(ns);
+
+CREATE VIRTUAL TABLE retrieval_doc_fts USING fts5(
+  text, content='retrieval_doc', content_rowid='rowid'
+);
+CREATE TRIGGER retrieval_doc_ai AFTER INSERT ON retrieval_doc BEGIN
+  INSERT INTO retrieval_doc_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER retrieval_doc_ad AFTER DELETE ON retrieval_doc BEGIN
+  INSERT INTO retrieval_doc_fts(retrieval_doc_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER retrieval_doc_au AFTER UPDATE ON retrieval_doc BEGIN
+  INSERT INTO retrieval_doc_fts(retrieval_doc_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+  INSERT INTO retrieval_doc_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+
+-- §M.2.4 — one row per assembled turn. A CDC table, so the chip and the live latency
+-- readout update through the one event path (ARCH §5.2).
+CREATE TABLE context_pack (
+  id            TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  chat_turn_id  TEXT REFERENCES chat_turn(id),
+  arm           TEXT,                 -- 'digest_on' | 'digest_off' | NULL (not in an experiment)
+  backend       TEXT NOT NULL,        -- 'moss' | 'fts5'
+  retrieval_ms  REAL NOT NULL,        -- max of the parallel queries: the wall time the turn paid
+  assembly_ms   REAL NOT NULL,
+  tokens_used   INTEGER NOT NULL,
+  overflow      INTEGER NOT NULL,
+  degraded      INTEGER NOT NULL DEFAULT 0,
+  items_json    TEXT NOT NULL,        -- [{id, ns, score, src_table, src_id}] — ids only, no text
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX context_pack_task_idx ON context_pack(task_id, created_at);
+CREATE INDEX context_pack_turn_idx ON context_pack(chat_turn_id);
+`;
+
+/**
+ * M14 — F1, self-maintaining APIs (OSADE-MOSS §M.5.2).
+ *
+ * Three things here are load-bearing and easy to misread as bookkeeping:
+ *
+ *   - **`migration.changes_confirmed_at`.** Extracted changes are inert until a human confirms
+ *     them. This is `verify_plan.needs_review` (§10.1) applied to a second inferred artefact:
+ *     work a model inferred is never run silently the first time.
+ *   - **`call_site.confirmed` is nullable.** NULL means "nobody has looked yet", which is not
+ *     the same as rejected. Discovery maximises recall on purpose (§M.5.5); the agent and then
+ *     verification decide what was real, and collapsing the three states into a boolean would
+ *     throw away the distinction the whole two-stage design rests on.
+ *   - **`discovery_miss`.** A site verification found that discovery did not. Recording it is
+ *     how recall improves from real failures rather than guessed test cases (§M.5.8).
+ *
+ * No column here is a status. `migration_target` carries no progress field: F1's progress is
+ * derived from its lanes' task statuses, exactly as §M.3 requires.
+ */
+const M014_MIGRATION = `
+CREATE TABLE migration (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  package TEXT NOT NULL,
+  from_version TEXT,
+  to_version TEXT NOT NULL,
+  changelog_text TEXT NOT NULL,
+  sdk_diff_ref TEXT,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  -- §M.5.3 — nothing downstream runs until these are set.
+  changes_confirmed_at INTEGER,
+  changes_confirmed_by TEXT
+);
+
+CREATE TABLE migration_change (
+  id TEXT PRIMARY KEY,
+  migration_id TEXT NOT NULL REFERENCES migration(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                  -- 'rename' | 'signature' | 'removal' | 'behavior'
+  old_symbol TEXT,
+  new_symbol TEXT,
+  description TEXT NOT NULL,
+  source TEXT NOT NULL,                -- 'changelog' | 'sdk_diff' | 'user'
+  -- §M.5.3 INVARIANT: the changelog line or diff hunk this came from, verbatim. A row whose
+  -- evidence is not present in the model's input is dropped before it reaches this table.
+  evidence TEXT NOT NULL
+);
+CREATE INDEX migration_change_idx ON migration_change(migration_id);
+
+CREATE TABLE migration_target (
+  migration_id TEXT NOT NULL REFERENCES migration(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL REFERENCES repo(id),
+  wave INTEGER NOT NULL,               -- 0 = canary
+  arm TEXT NOT NULL,                   -- 'digest_on' | 'digest_off'  (§M.5.7)
+  stratum TEXT NOT NULL,               -- e.g. 'sites:6-20|loc:10k-50k'
+  task_id TEXT REFERENCES task(id),    -- NULL until launched
+  -- §M.5.5 — what the discovery run cost and what it could not read, per repo. Recorded
+  -- rather than recomputed: the comparison is evidence, and evidence has to survive a
+  -- restart to be worth putting on a screen.
+  discovery_ms REAL NOT NULL DEFAULT 0,
+  unparsed_files INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (migration_id, repo_id)
+);
+CREATE INDEX migration_target_task_idx ON migration_target(task_id);
+
+CREATE TABLE code_chunk (
+  id TEXT PRIMARY KEY,
+  migration_id TEXT NOT NULL REFERENCES migration(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL,
+  file TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  symbol TEXT,
+  kind TEXT NOT NULL,                  -- 'function' | 'import' | 'call' | 'derived_wrapper'
+  hop INTEGER NOT NULL DEFAULT 0,      -- transitive depth, §M.5.4
+  enriched_text TEXT NOT NULL,
+  base_sha TEXT NOT NULL
+);
+CREATE INDEX code_chunk_scope_idx ON code_chunk(migration_id, repo_id);
+
+CREATE TABLE call_site (
+  id TEXT PRIMARY KEY,
+  migration_id TEXT NOT NULL REFERENCES migration(id) ON DELETE CASCADE,
+  change_id TEXT NOT NULL REFERENCES migration_change(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL,
+  chunk_id TEXT REFERENCES code_chunk(id),
+  file TEXT NOT NULL,
+  line INTEGER NOT NULL,
+  via TEXT NOT NULL,                   -- 'direct' | 'alias' | 'wrapper'
+  score REAL,
+  found_by TEXT NOT NULL,              -- 'moss' | 'grep' | 'both'
+  confirmed INTEGER,                   -- NULL unknown, 1 confirmed, 0 rejected
+  confirmed_by TEXT,                   -- 'agent' | 'verify'
+  UNIQUE (migration_id, change_id, repo_id, file, line)
+);
+CREATE INDEX call_site_scope_idx ON call_site(migration_id, repo_id);
+
+CREATE TABLE discovery_miss (
+  id TEXT PRIMARY KEY,
+  migration_id TEXT NOT NULL REFERENCES migration(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL,
+  file TEXT NOT NULL,
+  line INTEGER NOT NULL,
+  pattern TEXT NOT NULL,
+  verify_run_id TEXT NOT NULL REFERENCES verify_run(id),
+  fixture_path TEXT
+);
+CREATE INDEX discovery_miss_idx ON discovery_miss(migration_id, repo_id);
+`;
+
+/**
+ * M16 — F4, compliance on the gate (OSADE-MOSS §M.8.1).
+ *
+ * **INVARIANT C1: a compliance flag without a cited clause is not a flag.** That is why
+ * `gate_clause.clause_id` is a foreign key and why there is no free-text column anywhere in
+ * this schema for "a model thinks this might be risky". Every clause shown on an approval card
+ * traces to a heading in a Markdown file at a known `file_sha`, and a reader can open it.
+ *
+ * **INVARIANT C2: retrieval informs; humans decide.** Nothing here blocks execution. The only
+ * thing that gates the approve button is `requires_ack`, which a human wrote into a policy
+ * file — and the ack is recorded with who and when, because §M.8.4's audit export has to be
+ * able to say that a named person saw a named clause.
+ */
+const M016_POLICY = `
+CREATE TABLE policy (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,                 -- 'repo' | 'global'
+  repo_id TEXT REFERENCES repo(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  -- The content hash of the file the clauses were read from. An approval binds to the clauses
+  -- as they were, so the version has to be recoverable later (§M.8.4).
+  file_sha TEXT NOT NULL,
+  title TEXT NOT NULL,
+  loaded_at INTEGER NOT NULL,
+  UNIQUE (scope, repo_id, path)
+);
+
+CREATE TABLE policy_clause (
+  id TEXT PRIMARY KEY,
+  policy_id TEXT NOT NULL REFERENCES policy(id) ON DELETE CASCADE,
+  clause_ref TEXT NOT NULL,            -- e.g. 'SEC-3.2', taken from the heading
+  title TEXT NOT NULL,
+  text TEXT NOT NULL,
+  -- §M.8.3 — the one thing that can gate the approve button, and only because a human wrote it.
+  requires_ack INTEGER NOT NULL DEFAULT 0,
+  applies_to TEXT                      -- optional path globs, one per line
+);
+CREATE INDEX policy_clause_policy_idx ON policy_clause(policy_id);
+
+CREATE TABLE gate_clause (
+  gate_id TEXT NOT NULL REFERENCES gate_request(id) ON DELETE CASCADE,
+  hunk_ref TEXT NOT NULL,              -- 'path:startLine'
+  clause_id TEXT NOT NULL REFERENCES policy_clause(id) ON DELETE CASCADE,
+  score REAL NOT NULL,
+  acked_by TEXT,
+  acked_at INTEGER,
+  PRIMARY KEY (gate_id, hunk_ref, clause_id)
+);
+CREATE INDEX gate_clause_gate_idx ON gate_clause(gate_id);
+`;
+
+/**
+ * M17 — F1's verified fix patterns (OSADE-MOSS §M.5.5).
+ *
+ * A row here means: a required verification passed at this head SHA, and this normalised hunk
+ * was part of what passed. That is the strongest evidence one lane can hand another, which is
+ * why §M.2.2 weights it above a convention and filters the sibling digest on `verified = '1'`.
+ *
+ * `pattern_hash` is the dedupe key: five lanes applying the same one-line fix collapse to one
+ * cited line with a count rather than five near-identical ones.
+ */
+const M017_FIX_PATTERN = `
+CREATE TABLE fix_pattern (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL,
+  migration_id TEXT,
+  verify_run_id TEXT NOT NULL REFERENCES verify_run(id) ON DELETE CASCADE,
+  head_sha TEXT NOT NULL,
+  file TEXT NOT NULL,
+  line INTEGER NOT NULL,
+  -- α-renamed identifiers, whitespace stripped, then hashed (§M.5.5).
+  pattern_hash TEXT NOT NULL,
+  -- The readable hunk, for the cited line the agent actually sees.
+  hunk TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (task_id, head_sha, file, line)
+);
+CREATE INDEX fix_pattern_hash_idx ON fix_pattern(pattern_hash);
+CREATE INDEX fix_pattern_task_idx ON fix_pattern(task_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: 1,
@@ -499,5 +837,34 @@ export const MIGRATIONS: readonly Migration[] = [
     id: 11,
     name: 'memory with FTS5 retrieval, no vector store',
     sql: M011_MEMORY_FTS,
+  },
+  {
+    id: 12,
+    name: 'retrieval log, cursor, FTS5 doc store, per-turn context packs',
+    sql:
+      M012_RETRIEVAL +
+      M012_TRIGGER_TABLES.map(retrievalTriggers).join('\n') +
+      cdcTriggers('context_pack'),
+  },
+  // 13 is deliberately absent. OSADE-MOSS §M.3 assigns it to F2's `member` / `presence` tables,
+  // which are not built yet. Migrations are applied by id, so a gap costs nothing, and keeping
+  // the PRD's numbering means every migration here can be read against the section that
+  // specified it. Do not renumber this to close the hole.
+  {
+    id: 14,
+    name: 'F1 — migrations, changes, targets, code chunks, call sites, discovery misses',
+    sql: M014_MIGRATION + retrievalTriggers('code_chunk'),
+  },
+  // 15 is reserved for F3's attestation tables (§M.3), which are not built yet. See the note
+  // above 14 for why the gap is kept rather than closed.
+  {
+    id: 16,
+    name: 'F4 — policies, clauses, and the clauses bound into a gate',
+    sql: M016_POLICY + retrievalTriggers('policy_clause'),
+  },
+  {
+    id: 17,
+    name: 'F1 — verified fix patterns, the evidence one lane hands another',
+    sql: M017_FIX_PATTERN + retrievalTriggers('fix_pattern'),
   },
 ];

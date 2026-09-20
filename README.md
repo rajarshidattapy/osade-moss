@@ -52,6 +52,16 @@ These features are being built for the **YC Fall 2026 × Moss Zero Latency Build
 sits on the critical path of every turn across every lane, which is why speed matters here. Moss
 is a derived, rebuildable index; SQLite stays the only source of truth.
 
+**Built so far:** the retrieval layer (one writer, a `retrieval_log` the database triggers
+maintain, `osade index rebuild` as the defined recovery); per-turn context assembly with a cited
+block on every prompt; **self-maintaining APIs end to end** — changelog extraction gated on human
+confirmation, tree-sitter chunking with resolved-context enrichment, retrieval-vs-grep discovery,
+waves gated on a green canary, and lanes that publish their verified fixes to their siblings
+(`osade migrate`); and **compliance on the gate** — policy clauses matched to the hunks they
+cover, bound into the approval hash, with `requires_ack` clauses blocking approval until a named
+human acknowledges them (`osade policy`). Multiplayer lanes and human-approval attestation are
+still to come.
+
 ## Quickstart
 
 You need **Node.js 22+**, **pnpm** (`corepack enable`), **git**, and at least one agent CLI on your
@@ -82,8 +92,9 @@ Optional:
 
 - Set `OSADE_GITHUB_TOKEN` and Osade uses it for issues and PRs. Without it, GitHub features stay
   off. (🚧 Picking up an existing `gh auth login` session is planned, not wired up.)
-- 🚧 `MOSS_PROJECT_ID` / `MOSS_PROJECT_KEY` are reserved for Moss retrieval, which isn't wired in
-  yet. Today retrieval is always local SQLite full-text search.
+- Set `MOSS_PROJECT_ID` / `MOSS_PROJECT_KEY` to run retrieval on Moss. Without them Osade falls
+  back to SQLite FTS5 and says so — `osade index stats` prints which backend is live, its doc
+  counts and its p50/p95.
 
 <details>
 <summary>Windows desktop shortcut</summary>
@@ -106,7 +117,7 @@ don't die with the app.
 ```text
 Electron app        chats, lanes, files, diffs, checks, gates
       │  tRPC + WebSocket over loopback (127.0.0.1)
-Osade daemon        lanes, verification, gates, GitHub, conventions, retrieval
+Osade daemon        lanes, verification, gates, GitHub, conventions, Moss retrieval
       │             SQLite facts + change_log → CDC to every connected client
       │  JSON API over a local socket
 terminal substrate  PTYs, worktrees, agent detection, session persistence
@@ -135,7 +146,7 @@ That's why verification, evidence-cited conventions and human gates are the core
 rather than add-ons. It's also why the most valuable thing an agent can do is often triage that
 produces no PR at all: reproduce a bug, bisect a regression, write a failing test.
 
-The long version is in [docs/OSADE.md](docs/OSADE.md).
+The long version is in [docs/osade/OSADE.md](docs/osade/OSADE.md).
 
 ## Status
 
@@ -145,10 +156,9 @@ Early and moving fast. Usable, not stable. The Moss features are under active de
 
 | | |
 | --- | --- |
-| [docs/architechture.md](docs/architechture.md) | How it's built: processes, boundaries, invariants |
-| [docs/OSADE.md](docs/OSADE.md) | Full spec: data model, invariants, milestones |
+| [docs/osade/architechture.md](docs/osade/architechture.md) | How it's built: processes, boundaries, invariants |
+| [docs/osade/OSADE.md](docs/osade/OSADE.md) | Full spec: data model, invariants, milestones |
 | [docs/osadexmoss.md](docs/osadexmoss.md) | Moss features spec: retrieval layer, multiplayer, attestation, compliance |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to work on Osade |
 
 ## Contributing
 
@@ -158,4 +168,4 @@ no orchestration changes. Behaviour branches on declared capabilities (`plan-mod
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0.

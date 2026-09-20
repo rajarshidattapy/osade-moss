@@ -13,6 +13,9 @@ import { pruneChangeLog } from '../db/index.js';
 import type { Gates } from '../domain/gates.js';
 import type { LaunchTask } from '../domain/launch-task.js';
 import type { Knowledge } from '../knowledge/service.js';
+import type { GateClauses } from '../domain/gate-clauses.js';
+import type { MigrationService } from '../domain/migration.js';
+import type { RetrievalService } from '../retrieval/service.js';
 import type { HeadlessRuns } from '../domain/headless-run.js';
 import type { Triage } from '../domain/triage.js';
 import type { VerifyRunner } from '../domain/verify-run.js';
@@ -47,6 +50,12 @@ export interface DaemonServerOptions {
   poller: ScmPoller;
   /** §13 — absent when no model is configured. Mining is optional; everything else is not. */
   knowledge?: Knowledge | null;
+  /** §M.1 — the retrieval service backing `retrievalStats`, `indexRebuild` and context packs. */
+  retrieval?: RetrievalService | null;
+  /** §M.5 — F1's four stages. */
+  migrations?: MigrationService | null;
+  /** §M.8 — F4's clause matching and acks. */
+  clauses?: GateClauses | null;
   headless?: HeadlessRuns | null;
   /** 0 asks the OS for a free port, which is the default and what the port file is for. */
   port?: number;
@@ -79,6 +88,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
     poller: options.poller,
     shells,
     knowledge: options.knowledge ?? null,
+    retrieval: options.retrieval ?? null,
+    migrations: options.migrations ?? null,
+    clauses: options.clauses ?? null,
     headless: options.headless ?? null,
     now,
   };

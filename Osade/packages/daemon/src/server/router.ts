@@ -4,9 +4,19 @@ import { initTRPC, TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
 import {
+  ContextItem,
+  ContextPack,
   ConventionImpact,
   ConventionView,
+  DiscoveryMiss,
+  GateClauseView,
+  MigrationChangeKind,
+  MigrationMetrics,
+  MigrationView,
+  PolicyReloadResult,
   MineStatus,
+  Namespace,
+  RetrievalStats,
   TaskId,
   TaskStatus,
   TaskView,
@@ -56,6 +66,10 @@ import type { Triage, TriageKind } from '../domain/triage.js';
 import type { VerifyRunner } from '../domain/verify-run.js';
 import type { Knowledge } from '../knowledge/service.js';
 import { readRepoRules, repoRulesPath, writeRepoRules } from '../knowledge/repo-rules.js';
+import { MigrationNotConfirmedError, type MigrationService } from '../domain/migration.js';
+import type { GateClauses } from '../domain/gate-clauses.js';
+import { reloadPolicies } from '../knowledge/policies.js';
+import type { RetrievalService } from '../retrieval/service.js';
 import type { ScmPoller } from '../scm/poller.js';
 import type { CommentPayload, OpenPrPayload, ScmWrites } from '../scm/writes.js';
 
@@ -78,6 +92,12 @@ export interface DaemonContext {
   headless?: HeadlessRuns | null;
   /** §13 — absent when no model is configured. Mining is optional; everything else is not. */
   knowledge?: Knowledge | null;
+  /** §M.1 — absent only in a test harness. A running daemon always has one, on some backend. */
+  retrieval?: RetrievalService | null;
+  /** §M.5 — F1. Present whenever retrieval is; discovery is meaningless without it. */
+  migrations?: MigrationService | null;
+  /** §M.8 — F4. Absent only in a test harness that does not exercise gate clauses. */
+  clauses?: GateClauses | null;
   now: () => number;
 }
 
@@ -1071,7 +1091,7 @@ export const appRouter = t.router({
         base: plan.prBase,
         draft: input.draft ?? false,
       };
-      return { gateId: ctx.scmWrites.requestGate(input.taskId, 'gate.pr_open', payload) };
+      return { gateId: await ctx.scmWrites.requestGate(input.taskId, 'gate.pr_open', payload) };
     }),
 
   /**
@@ -1081,7 +1101,7 @@ export const appRouter = t.router({
   issueCommentRequest: t.procedure
     .input(z.object({ taskId: TaskId, body: z.string().min(1) }))
     .output(z.object({ gateId: z.string() }))
-    .mutation(({ ctx, input }) => {
+    .mutation(async ({ ctx, input }) => {
       const task = getTask(ctx.db, input.taskId);
       if (!task) throw new TRPCError({ code: 'NOT_FOUND', message: 'unknown task' });
       if (issueNumberFromRef(task.origin_ref) == null) {
@@ -1092,7 +1112,7 @@ export const appRouter = t.router({
       }
       const disclosure = '_Produced by an agent through Osade, and reviewed by a human before posting._';
       const body = input.body.includes(disclosure) ? input.body : `${input.body.trim()}\n\n---\n${disclosure}`;
-      return { gateId: ctx.scmWrites.requestGate(input.taskId, 'gate.issue_comment', { body }) };
+      return { gateId: await ctx.scmWrites.requestGate(input.taskId, 'gate.issue_comment', { body }) };
     }),
 
   // ── §13 repository conventions ─────────────────────────────────────────────
@@ -1168,7 +1188,392 @@ export const appRouter = t.router({
       requireKnowledge(ctx).reject(input.id, input.reason);
       return { ok: true as const };
     }),
+
+  // ── §M.1, §M.2 the retrieval layer ─────────────────────────────────────────
+
+  /**
+   * §M.1.7 — doc counts, p50/p95 per namespace, and which backend is answering.
+   *
+   * The degraded-retrieval badge reads this. `backend: 'fts5'` with a `degradedReason` is the
+   * normal state of an install with no Moss credentials, not an error, so the UI says what is
+   * missing rather than that something is broken.
+   */
+  retrievalStats: t.procedure
+    .output(RetrievalStats)
+    .query(({ ctx }) => requireRetrieval(ctx).stats()),
+
+  /**
+   * §M.1.4 — drop the index and re-project every row from SQLite.
+   *
+   * Safe by construction (R1): the index is derived, so the worst a rebuild costs is the time
+   * it takes. It is a mutation because it is expensive, not because it changes any fact.
+   */
+  indexRebuild: t.procedure
+    .input(z.object({ ns: Namespace.optional() }))
+    .output(z.object({ indexed: z.number().int() }))
+    .mutation(async ({ ctx, input }) => ({
+      indexed: await requireRetrieval(ctx).rebuild(input.ns),
+    })),
+
+  /**
+   * §M.2.4 — one turn's pack, with the cited text resolved.
+   *
+   * The stored row holds ids only, so the text is re-read from the source rows here. A cited
+   * item whose row has since been deleted is dropped rather than rendered as a dead id: the
+   * pack is a record of what was sent, and a link that goes nowhere is worse than one fewer
+   * line.
+   */
+  contextPackGet: t.procedure
+    .input(z.object({ id: z.string() }))
+    .output(ContextPack.nullable())
+    .query(({ ctx, input }) => readContextPack(ctx.db, input.id)),
+
+  // ── §M.5 F1 self-maintaining APIs ──────────────────────────────────────────
+
+  /** §M.5.3 — records the changelog. Extraction is a separate, explicit step. */
+  migrationCreate: t.procedure
+    .input(
+      z.object({
+        provider: z.string().min(1),
+        package: z.string().min(1),
+        fromVersion: z.string().nullable().optional(),
+        toVersion: z.string().min(1),
+        changelogText: z.string().min(1),
+        sdkDiffRef: z.string().nullable().optional(),
+      }),
+    )
+    .output(z.object({ migrationId: z.string() }))
+    .mutation(({ ctx, input }) => ({
+      migrationId: requireMigrations(ctx).create({ ...input, createdBy: 'local' }),
+    })),
+
+  /**
+   * §M.5.3 — asks a headless agent for the changes.
+   *
+   * Reports what was dropped as well as what was kept: a run that extracted ten changes and
+   * kept none is a model inventing changelog lines, and that has to be visible rather than
+   * looking like a changelog with nothing in it.
+   */
+  migrationExtract: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(z.object({ kept: z.number().int(), dropped: z.number().int() }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await requireMigrations(ctx).extractChanges(input.migrationId);
+      } catch (err) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: (err as Error).message });
+      }
+    }),
+
+  /** §M.5.3 — hand entry, for what the model missed. */
+  migrationAddChange: t.procedure
+    .input(
+      z.object({
+        migrationId: z.string(),
+        kind: MigrationChangeKind,
+        oldSymbol: z.string().nullable().optional(),
+        newSymbol: z.string().nullable().optional(),
+        description: z.string().min(1),
+        evidence: z.string().optional(),
+      }),
+    )
+    .output(z.object({ changeId: z.string() }))
+    .mutation(({ ctx, input }) => ({
+      changeId: requireMigrations(ctx).addChange(input.migrationId, {
+        kind: input.kind,
+        old_symbol: input.oldSymbol ?? null,
+        new_symbol: input.newSymbol ?? null,
+        description: input.description,
+        ...(input.evidence ? { evidence: input.evidence } : {}),
+      }),
+    })),
+
+  /** §M.5.3 — the gate between inference and action. Nothing downstream runs before this. */
+  migrationChangesConfirm: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(({ ctx, input }) => {
+      try {
+        requireMigrations(ctx).confirmChanges(input.migrationId, 'local');
+        return { ok: true as const };
+      } catch (err) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: (err as Error).message });
+      }
+    }),
+
+  /** §M.5.7 — assigns strata, arms and waves. Fixed at assignment. */
+  migrationTargetsSet: t.procedure
+    .input(z.object({ migrationId: z.string(), repoIds: z.array(z.string()).min(1) }))
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(async ({ ctx, input }) => {
+      await guardMigration(() => requireMigrations(ctx).setTargets(input.migrationId, input.repoIds));
+      return { ok: true as const };
+    }),
+
+  /** §M.5.4 — parse, enrich and write the chunks. They reach Moss through the indexer. */
+  migrationChunk: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(z.object({ chunks: z.number().int(), unparsed: z.array(z.string()) }))
+    .mutation(({ ctx, input }) =>
+      guardMigration(() => requireMigrations(ctx).chunkTargets(input.migrationId)),
+    ),
+
+  /** §M.5.5 — retrieval and grep, both recorded. */
+  migrationDiscover: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(z.object({ sites: z.number().int(), queryMs: z.number() }))
+    .mutation(({ ctx, input }) =>
+      guardMigration(() => requireMigrations(ctx).discover(input.migrationId)),
+    ),
+
+  /** §M.5.6 — one wave, through the ordinary launch path. */
+  migrationLaunchWave: t.procedure
+    .input(z.object({ migrationId: z.string(), wave: z.number().int().min(0) }))
+    .output(z.object({ launched: z.array(TaskId), deferred: z.array(z.string()) }))
+    .mutation(({ ctx, input }) =>
+      guardMigration(() => requireMigrations(ctx).launchWave(input.migrationId, input.wave)),
+    ),
+
+  migrationView: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(MigrationView.nullable())
+    .query(({ ctx, input }) => requireMigrations(ctx).view(input.migrationId)),
+
+  /** §M.5.7 — the A/B readout. Every number derived, `n` shown beside it. */
+  migrationMetrics: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(MigrationMetrics)
+    .query(({ ctx, input }) => requireMigrations(ctx).metrics(input.migrationId)),
+
+  /** §M.5.8 — sites verification found that discovery did not. */
+  migrationMisses: t.procedure
+    .input(z.object({ migrationId: z.string() }))
+    .output(z.array(DiscoveryMiss))
+    .query(({ ctx, input }) => requireMigrations(ctx).misses(input.migrationId)),
+
+  migrationMissesExport: t.procedure
+    .input(z.object({ migrationId: z.string(), dir: z.string().min(1) }))
+    .output(z.object({ written: z.array(z.string()) }))
+    .mutation(async ({ ctx, input }) => ({
+      written: await requireMigrations(ctx).exportMisses(input.migrationId, input.dir),
+    })),
+
+  // ── §M.8 F4 compliance on the gate ─────────────────────────────────────────
+
+  /**
+   * §M.8.1 — re-reads the policy files.
+   *
+   * Explicit rather than watched: a reload changes which clauses a pending gate is bound to,
+   * and a filesystem watcher firing on a half-saved file would void approvals for no reason
+   * anyone could see.
+   */
+  policyReload: t.procedure
+    .output(PolicyReloadResult)
+    .mutation(({ ctx }) => reloadPolicies(ctx.db, { onWarning: () => {} })),
+
+  /** §M.8.3 — what the gate card shows, and whether approve is available yet. */
+  gateClauses: t.procedure
+    .input(z.object({ gateId: z.string() }))
+    .output(GateClauseView)
+    .query(({ ctx, input }) => readGateClauses(ctx, input.gateId)),
+
+  /**
+   * §M.8.3 — acknowledges one `requires_ack` clause.
+   *
+   * The ack records who and when. It is not an approval and does not decide the gate; it only
+   * removes one obstacle a human policy author deliberately put in front of the button.
+   */
+  gateClauseAck: t.procedure
+    .input(z.object({ gateId: z.string(), clauseId: z.string() }))
+    .output(GateClauseView)
+    .mutation(({ ctx, input }) => {
+      requireClauses(ctx).ack(input.gateId, input.clauseId, 'human', ctx.now());
+      return readGateClauses(ctx, input.gateId);
+    }),
+
+  /** The chip on a lane: the most recent pack for a task, or null before its first turn. */
+  contextPackLatest: t.procedure
+    .input(z.object({ taskId: TaskId }))
+    .output(ContextPack.nullable())
+    .query(({ ctx, input }) => {
+      const row = ctx.db
+        .prepare('SELECT id FROM context_pack WHERE task_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(input.taskId) as { id: string } | undefined;
+      return row ? readContextPack(ctx.db, row.id) : null;
+    }),
 });
+
+function requireMigrations(ctx: DaemonContext): MigrationService {
+  if (!ctx.migrations) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no migration service configured',
+    });
+  }
+  return ctx.migrations;
+}
+
+/**
+ * §M.5.3 — unconfirmed changes are a precondition failure, not a server error.
+ *
+ * The distinction matters to the UI: "confirm the changes first" is an instruction the user can
+ * act on, while a 500 is a bug report.
+ */
+async function guardMigration<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof MigrationNotConfirmedError) {
+      throw new TRPCError({ code: 'PRECONDITION_FAILED', message: err.message });
+    }
+    throw err;
+  }
+}
+
+function requireClauses(ctx: DaemonContext): GateClauses {
+  if (!ctx.clauses) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no policy clause service configured',
+    });
+  }
+  return ctx.clauses;
+}
+
+interface ClauseRow {
+  hunk_ref: string;
+  clause_id: string;
+  score: number;
+  acked_by: string | null;
+  acked_at: number | null;
+  clause_ref: string;
+  title: string;
+  text: string;
+  requires_ack: number;
+  scope: string;
+  policy_path: string;
+  file_sha: string;
+}
+
+/**
+ * §M.8.3 — the card, assembled from rows.
+ *
+ * C1 in practice: every field here comes from a `policy_clause` joined to the `policy` file it
+ * was read from, at the `file_sha` it had. There is nowhere for an uncited flag to enter.
+ */
+function readGateClauses(ctx: DaemonContext, gateId: string): GateClauseView {
+  const rows = ctx.db
+    .prepare(
+      `SELECT gc.hunk_ref, gc.clause_id, gc.score, gc.acked_by, gc.acked_at,
+              pc.clause_ref, pc.title, pc.text, pc.requires_ack,
+              p.scope, p.path AS policy_path, p.file_sha
+         FROM gate_clause gc
+         JOIN policy_clause pc ON pc.id = gc.clause_id
+         JOIN policy p ON p.id = pc.policy_id
+        WHERE gc.gate_id = ?
+        ORDER BY gc.hunk_ref, pc.clause_ref`,
+    )
+    .all(gateId) as ClauseRow[];
+
+  const byHunk = new Map<string, GateClauseView['hunks'][number]>();
+  let outstanding = 0;
+  for (const row of rows) {
+    const hunk = byHunk.get(row.hunk_ref) ?? { hunk_ref: row.hunk_ref, clauses: [] };
+    if (row.requires_ack === 1 && row.acked_at == null) outstanding += 1;
+    hunk.clauses.push({
+      clause_id: row.clause_id,
+      clause_ref: row.clause_ref,
+      title: row.title,
+      text: row.text,
+      scope: row.scope === 'global' ? 'global' : 'repo',
+      policy_path: row.policy_path,
+      file_sha: row.file_sha,
+      requires_ack: row.requires_ack === 1,
+      score: row.score,
+      acked_by: row.acked_by,
+      acked_at: row.acked_at,
+    });
+    byHunk.set(row.hunk_ref, hunk);
+  }
+
+  return {
+    gate_id: gateId,
+    hunks: [...byHunk.values()],
+    outstandingAcks: outstanding,
+    approvable: outstanding === 0,
+  };
+}
+
+/** Retrieval is always present in a running daemon; a test harness may omit it. */
+function requireRetrieval(ctx: DaemonContext): RetrievalService {
+  if (!ctx.retrieval) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no retrieval service configured',
+    });
+  }
+  return ctx.retrieval;
+}
+
+interface PackRow {
+  id: string;
+  task_id: string;
+  chat_turn_id: string | null;
+  arm: string | null;
+  backend: string;
+  retrieval_ms: number;
+  assembly_ms: number;
+  tokens_used: number;
+  overflow: number;
+  degraded: number;
+  items_json: string;
+  created_at: number;
+}
+
+function readContextPack(db: Db, id: string): ContextPack | null {
+  const row = db.prepare('SELECT * FROM context_pack WHERE id = ?').get(id) as PackRow | undefined;
+  if (!row) return null;
+
+  const stored = JSON.parse(row.items_json) as {
+    id: string;
+    ns: Namespace;
+    score: number;
+    src_table: string;
+    src_id: string;
+  }[];
+
+  const items: ContextItem[] = [];
+  for (const item of stored) {
+    const doc = db
+      .prepare('SELECT text, meta_json FROM retrieval_doc WHERE id = ?')
+      .get(item.id) as { text: string; meta_json: string } | undefined;
+    // §M.2.4 — text lives in the source rows and in the FTS5 doc store, never in items_json.
+    // When neither has it any more, the citation is stale and is dropped.
+    if (!doc) continue;
+    let url: string | null = null;
+    try {
+      url = (JSON.parse(doc.meta_json) as { url?: string }).url ?? null;
+    } catch {
+      url = null;
+    }
+    items.push({ ...item, text: doc.text, url });
+  }
+
+  return {
+    id: row.id,
+    task_id: row.task_id,
+    chat_turn_id: row.chat_turn_id,
+    arm: row.arm === 'digest_on' || row.arm === 'digest_off' ? row.arm : null,
+    backend: row.backend === 'moss' ? 'moss' : 'fts5',
+    retrieval_ms: row.retrieval_ms,
+    assembly_ms: row.assembly_ms,
+    tokens_used: row.tokens_used,
+    overflow: row.overflow,
+    degraded: row.degraded === 1,
+    items,
+    created_at: row.created_at,
+  };
+}
 
 /**
  * Approval is not the write. `gate.branch_switch` already executed here; public GitHub

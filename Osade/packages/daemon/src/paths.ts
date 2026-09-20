@@ -27,6 +27,11 @@ export interface OsadePaths {
   readonly reviewDir: string;
   readonly skillsDir: string;
   readonly worktreesDir: string;
+  /**
+   * OSADE-MOSS §M.9.1 — Moss session snapshots. **Disposable**: deleting this directory costs
+   * one rebuild from SQLite and nothing else, which is R1 stated as a filesystem property.
+   */
+  readonly mossDir: string;
   readonly electronUserData: string;
   /** Where the daemon writes its port so the CLI and the Electron app can find it. */
   readonly portFile: string;
@@ -45,6 +50,7 @@ export function osadePaths(env: NodeJS.ProcessEnv = process.env): OsadePaths {
     reviewDir: join(root, 'review'),
     skillsDir: join(root, 'skills'),
     worktreesDir: join(root, 'worktrees'),
+    mossDir: join(root, 'moss'),
     electronUserData: join(root, 'electron'),
     portFile: join(root, 'daemon.port'),
     pidFile: join(root, 'daemon.pid'),

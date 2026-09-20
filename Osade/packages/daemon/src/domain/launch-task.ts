@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { basename, join } from 'node:path';
 
-import { orchestratorId } from '@osade/contract';
+import { orchestratorId, type TaskOriginKind } from '@osade/contract';
 
 import type { Db } from '../db/index.js';
 import { getTask } from '../db/task-repo.js';
@@ -15,7 +15,7 @@ import {
 } from '../substrate/client.js';
 import type { SubstrateEventSubscriber } from '../substrate/event-subscriber.js';
 import { Conventions } from '../knowledge/conventions.js';
-import { renderContextFile } from '../knowledge/context-file.js';
+import { renderContextFile, type MigrationBrief } from '../knowledge/context-file.js';
 import { osadePaths, worktreePathFor } from '../paths.js';
 import { readRepoRules, ensureRepoRules } from '../knowledge/repo-rules.js';
 import {
@@ -38,6 +38,7 @@ import {
 } from './chat-turns.js';
 import { paneDelta } from './pane-delta.js';
 import type { Checkpoints } from './checkpoints.js';
+import type { ContextAssembler } from '../retrieval/assembler.js';
 import {
   DEFAULT_MIRROR_PATHS,
   currentBranch,
@@ -139,6 +140,13 @@ export interface CreateTaskInput {
   isolate?: boolean | undefined;
   /** §17 — repo-root planner. Never isolated; reused if it already exists. */
   home?: boolean | undefined;
+  /**
+   * Where this lane came from. Defaults to `manual`.
+   *
+   * OSADE-MOSS §M.5.6 sets `api_migration` so the ledger can say a lane is part of a migration.
+   * It is a label on an otherwise ordinary lane — F1 adds no orchestration, which is the point.
+   */
+  originKind?: TaskOriginKind | undefined;
 }
 
 export interface CreateTaskResult {
@@ -205,6 +213,15 @@ export interface LaunchTaskOptions {
    * it; when present, launch captures one and a capture failure never fails the launch.
    */
   checkpoints?: Checkpoints;
+  /**
+   * OSADE-MOSS §M.2 — per-turn context assembly.
+   *
+   * Optional for the same reason `checkpoints` is: a daemon without it sends prompts exactly as
+   * it does today. When present, every prompt is prefixed with a cited, budgeted context block
+   * and the pack is recorded. R3 — an assembler that throws is logged and skipped; it can never
+   * stop a turn from being sent.
+   */
+  assembler?: ContextAssembler;
 }
 
 /**
@@ -237,6 +254,7 @@ export class LaunchTask {
   readonly #defaultAgent: string;
   readonly #onWarning: (message: string) => void;
   readonly #checkpoints: Checkpoints | null;
+  readonly #assembler: ContextAssembler | null;
   readonly #readyTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #promptAt = new Map<string, string>();
 
@@ -253,6 +271,7 @@ export class LaunchTask {
     this.#defaultAgent = options.defaultAgent ?? DAEMON_DEFAULT_AGENT;
     this.#onWarning = options.onWarning ?? (() => {});
     this.#checkpoints = options.checkpoints ?? null;
+    this.#assembler = options.assembler ?? null;
   }
 
   /** Registers a repo and a task row. No substrate calls — that is `launch`. */
@@ -337,13 +356,14 @@ export class LaunchTask {
       .prepare(
         `INSERT INTO task (id, repo_id, title, intent, origin_kind, agent_id, chat_id, base_ref,
                            base_sha, branch, worktree_path, checkout_ref, created_at)
-         VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         taskId,
         repoId,
         input.title,
         input.intent,
+        input.originKind ?? 'manual',
         input.agentId ?? null,
         chatId,
         baseRef,
@@ -982,7 +1002,7 @@ export class LaunchTask {
     options: { wait?: boolean; origin?: 'human' | 'automation' } = {},
   ): Promise<void> {
     const agentId = this.#agentIdFor(taskId);
-    const turn = await recordTurn(this.#db, (id, body, wait) => this.prompt(id, body, wait), {
+    const turn = await recordTurn(this.#db, (id, body, wait, turnId) => this.prompt(id, body, wait, turnId), {
       taskId,
       text,
       origin: options.origin ?? 'human',
@@ -1000,7 +1020,7 @@ export class LaunchTask {
     const agentId = this.#agentIdFor(taskId);
     await dispatchQueued(
       this.#db,
-      (id, body, wait) => this.prompt(id, body, wait),
+      (id, body, wait, turnId) => this.prompt(id, body, wait, turnId),
       taskId,
       false,
       this.#now(),
@@ -1044,10 +1064,11 @@ export class LaunchTask {
    * can miss that window without anything being wrong. A second submission is safe because the
    * first one was rejected before any input was sent.
    */
-  async prompt(taskId: string, text: string, wait: boolean): Promise<void> {
+  async prompt(taskId: string, text: string, wait: boolean, turnId?: string): Promise<void> {
     const paneId = this.#paneFor(taskId);
     if (!paneId) throw new Error(`task ${taskId} has no live agent pane`);
 
+    const body = await this.#withContext(taskId, text, turnId);
     const agentId = this.#agentIdFor(taskId);
     const ready = await this.#awaitAgentReady(paneId, readyTimeoutMs(agentId));
     if (!ready.interactive) {
@@ -1066,11 +1087,11 @@ export class LaunchTask {
     const params: SubstrateMethodParams['agent.prompt'] = wait
       ? {
           target: paneId,
-          text,
+          text: body,
           // Any settled state ends the wait; §6.1 decides what each one means, not this call.
           wait: { until: ['idle', 'done', 'blocked'], timeout_ms: 300_000 },
         }
-      : { target: paneId, text };
+      : { target: paneId, text: body };
     const timeout = wait ? 310_000 : 30_000;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -1083,6 +1104,33 @@ export class LaunchTask {
         this.#onWarning(`prompt to ${taskId} stalled on submission; retrying once`);
         await new Promise((resolve) => setTimeout(resolve, 1_000));
       }
+    }
+  }
+
+  /**
+   * OSADE-MOSS §M.2 — prefixes the turn with its assembled context block.
+   *
+   * The block is prepended to what the agent receives and is **never written to
+   * `chat_turn.text`**, so the durable transcript stays exactly what the human and the agent
+   * said. That is a deliberate divergence from how `<osade_lanes>` works: the lane digest is
+   * built in the renderer and travels inside the stored turn, which is why `renderer/chat.ts`
+   * has to strip it back out on display. Retrieval runs in the daemon, so it does not need that
+   * round trip, and not storing it means there is nothing to strip and nothing to get wrong.
+   *
+   * INVARIANT R3: this never fails a turn. An assembler that throws costs the agent its context
+   * for one turn, and the turn still goes out.
+   */
+  async #withContext(taskId: string, text: string, turnId?: string): Promise<string> {
+    if (!this.#assembler) return text;
+    try {
+      const assembled = await this.#assembler.build(taskId, text, turnId);
+      if (!assembled?.block) return text;
+      return [assembled.block, '', text].join('\n');
+    } catch (err) {
+      this.#onWarning(
+        `context assembly for ${taskId} failed, sending the turn without it: ${(err as Error).message}`,
+      );
+      return text;
     }
   }
 
@@ -1162,6 +1210,68 @@ export class LaunchTask {
    * `renderContextFile`. A repo that has never been mined simply has no rules section: mining is
    * a separate, explicit action (§13.4), and launching must never block on it.
    */
+  /**
+   * OSADE-MOSS §M.5.6 — the migration sections, for a lane that belongs to one.
+   *
+   * Read from the tables rather than passed in, so `LaunchTask` keeps knowing nothing about F1
+   * beyond "a task may have a migration row". Returns undefined for every ordinary lane, which
+   * is all of them outside a migration.
+   */
+  #migrationBrief(taskId: string): { migration: MigrationBrief } | undefined {
+    const target = this.#db
+      .prepare(
+        `SELECT mt.migration_id, mt.repo_id, m.package, m.to_version
+           FROM migration_target mt JOIN migration m ON m.id = mt.migration_id
+          WHERE mt.task_id = ?`,
+      )
+      .get(taskId) as
+      | { migration_id: string; repo_id: string; package: string; to_version: string }
+      | undefined;
+    if (!target) return undefined;
+
+    const changes = this.#db
+      .prepare(
+        `SELECT kind, description, evidence, old_symbol, new_symbol
+           FROM migration_change WHERE migration_id = ? ORDER BY rowid`,
+      )
+      .all(target.migration_id) as {
+      kind: string;
+      description: string;
+      evidence: string;
+      old_symbol: string | null;
+      new_symbol: string | null;
+    }[];
+
+    // Capped: a 400-site list is a context dump, and the agent has the full list a query away.
+    const sites = this.#db
+      .prepare(
+        `SELECT file, line, via, score FROM call_site
+          WHERE migration_id = ? AND repo_id = ?
+          ORDER BY COALESCE(score, 0) DESC, file, line LIMIT 60`,
+      )
+      .all(target.migration_id, target.repo_id) as {
+      file: string;
+      line: number;
+      via: string;
+      score: number | null;
+    }[];
+
+    return {
+      migration: {
+        packageName: target.package,
+        toVersion: target.to_version,
+        changes: changes.map((c) => ({
+          kind: c.kind,
+          description: c.description,
+          evidence: c.evidence,
+          oldSymbol: c.old_symbol,
+          newSymbol: c.new_symbol,
+        })),
+        sites,
+      },
+    };
+  }
+
   async #writeContext(
     task: { id: string; worktree_path: string | null; intent: string; base_ref: string; base_sha: string },
     repo: { id: string; path: string; gh_owner: string | null; gh_name: string | null },
@@ -1184,6 +1294,7 @@ export class LaunchTask {
       rulesText: usePasted ? rulesText : undefined,
       verifySteps: this.#verifyStepsFor(repo.id),
       overflow: usePasted ? 0 : overflow,
+      ...(this.#migrationBrief(task.id) ?? {}),
     });
 
     if (rendered.omitted > 0) {

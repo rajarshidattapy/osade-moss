@@ -7,7 +7,20 @@ import { getAgentFact } from '../db/task-repo.js';
 import { DEFAULT_READY_TIMEOUT_MS } from './agent-catalog.js';
 import { paneDelta } from './pane-delta.js';
 
-export type TurnPrompt = (taskId: string, text: string, wait: boolean) => Promise<void>;
+/**
+ * `turnId` is the `chat_turn` row this prompt carries.
+ *
+ * Optional because a caller that does not record turns (a test harness, a direct prompt) still
+ * has to be able to send one. It exists so OSADE-MOSS §M.2's context pack can be attached to
+ * the turn it was assembled for — a pack with no turn is a per-task average, and the chip the
+ * PRD describes sits on each turn.
+ */
+export type TurnPrompt = (
+  taskId: string,
+  text: string,
+  wait: boolean,
+  turnId?: string,
+) => Promise<void>;
 
 const INSERT = `INSERT INTO chat_turn (id, task_id, seq, role, origin, text, delivery, created_at)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
@@ -151,7 +164,7 @@ export async function dispatchQueued(
     })();
     if (!next) return;
     try {
-      await prompt(taskId, next.text, wait);
+      await prompt(taskId, next.text, wait, next.id);
       setDelivery(db, next.id, 'accepted');
     } catch (err) {
       setDelivery(db, next.id, 'failed', err instanceof Error ? err.message : String(err));

@@ -104,15 +104,75 @@ describe('§20.1 lint boundaries actually fire', () => {
   });
 });
 
-describe('the scopes that are deliberately exempt stay exempt', () => {
-  it('daemon/src/substrate/** may import the generated client', async () => {
-    const messages = await messagesFor(
-      'packages/daemon/src/substrate/probe.ts',
-      "import './generated/index.js';\n",
-    );
-    expect(messages.join('\n')).not.toContain('§4.2');
+describe('OSADE-MOSS §M.9.3 boundaries actually fire', () => {
+  const MOSS_IMPORT = ["import { MossClient } from '@moss-js/moss';", 'export const x = MossClient;', ''].join(
+    '\n',
+  );
+  const UPSERT = [
+    'export async function f(port: { upsert(a: string, b: unknown[]): Promise<void> }) {',
+    "  await port.upsert('turns', []);",
+    '}',
+    '',
+  ].join('\n');
+  const REMOVE = [
+    'export async function f(port: { remove(a: string, b: string[]): Promise<void> }) {',
+    "  await port.remove('turns', ['x']);",
+    '}',
+    '',
+  ].join('\n');
+
+  it('§M.1.2 — a Moss SDK is off-limits outside daemon/src/retrieval/**', async () => {
+    expect((await messagesFor(DOMAIN, MOSS_IMPORT)).join('\n')).toContain('§M.1.2');
   });
 
+  it('§M.1.2 — the frozen @moss-dev package is restricted too', async () => {
+    const code = MOSS_IMPORT.replace('@moss-js/moss', '@moss-dev/moss');
+    expect((await messagesFor(DOMAIN, code)).join('\n')).toContain('§M.1.2');
+  });
+
+  it('R1 — writing to the index from outside the indexer', async () => {
+    expect((await messagesFor(DOMAIN, UPSERT)).join('\n')).toContain('§M.1.4 R1');
+  });
+
+  it('R1 — removing from the index from outside the indexer', async () => {
+    expect((await messagesFor(DOMAIN, REMOVE)).join('\n')).toContain('§M.1.4 R1');
+  });
+
+  it('retrieval/** may import a Moss SDK — it is the one seam', async () => {
+    const messages = await messagesFor('packages/daemon/src/retrieval/probe.ts', MOSS_IMPORT);
+    expect(messages.join('\n')).not.toContain('§M.1.2');
+  });
+
+  const PARSER_IMPORT = [
+    "import { Parser } from 'web-tree-sitter';",
+    'export const x = Parser;',
+    '',
+  ].join('\n');
+
+  it('§M.5.4 — a tree-sitter parser is off-limits outside knowledge/code/**', async () => {
+    expect((await messagesFor(DOMAIN, PARSER_IMPORT)).join('\n')).toContain('§M.5.4');
+  });
+
+  it('§M.5.4 — the grammar package is restricted too', async () => {
+    const code = PARSER_IMPORT.replace('web-tree-sitter', '@vscode/tree-sitter-wasm');
+    expect((await messagesFor(DOMAIN, code)).join('\n')).toContain('§M.5.4');
+  });
+
+  it('knowledge/code/** may import a parser — it is the one seam', async () => {
+    const messages = await messagesFor(
+      'packages/daemon/src/knowledge/code/probe.ts',
+      PARSER_IMPORT,
+    );
+    expect(messages.join('\n')).not.toContain('§M.5.4');
+  });
+
+  it("the indexer may write to the index — it is R1's one writer", async () => {
+    const messages = await messagesFor('packages/daemon/src/retrieval/indexer.ts', UPSERT);
+    expect(messages.join('\n')).not.toContain('§M.1.4 R1');
+  });
+});
+
+describe('the scopes that are deliberately exempt stay exempt', () => {
   it('cli.ts may use console and process.exit — it is the one entry point', async () => {
     const messages = await messagesFor(
       'packages/daemon/src/cli.ts',

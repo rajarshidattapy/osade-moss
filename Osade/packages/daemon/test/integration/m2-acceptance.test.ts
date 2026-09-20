@@ -163,7 +163,7 @@ describe('M2 acceptance — the contribution loop', () => {
       base: plan.prBase,
       draft: false,
     };
-    const gateId = writer.requestGate(taskId, 'gate.pr_open', payload);
+    const gateId = await writer.requestGate(taskId, 'gate.pr_open', payload);
 
     // §6 row 3 — an undecided gate is the loudest thing in the ledger.
     expect(deriveStatus(getTaskFacts(db, taskId)!, NOW)).toBe('awaiting_approval');
@@ -220,7 +220,7 @@ describe('M2 acceptance — the contribution loop', () => {
 
     // Reporting it back is a public write, so it is gated like any other (§11.2).
     const body = { body: triage.composeComment(artifact, 'steps…') };
-    const gateId = writer.requestGate(taskId, 'gate.issue_comment', body);
+    const gateId = await writer.requestGate(taskId, 'gate.issue_comment', body);
 
     await expect(writer.comment(taskId, gateId, body, { issueNumber: 417 })).rejects.toThrow(
       /has not been decided/,
@@ -245,7 +245,7 @@ describe('M2 acceptance — the contribution loop', () => {
       base: 'main',
       draft: false,
     };
-    const gateId = writer.requestGate(taskId, 'gate.pr_open', payload);
+    const gateId = await writer.requestGate(taskId, 'gate.pr_open', payload);
     gates.decide(gateId, 'approve');
     await writer.openPr(taskId, gateId, payload);
     await poller.refreshPr(taskId, 88);

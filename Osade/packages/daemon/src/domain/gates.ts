@@ -127,6 +127,15 @@ export interface GateRequestInput {
   taskId: string;
   gate: GateName;
   payload: unknown;
+  /**
+   * OSADE-MOSS §M.8.2 — the policy clauses this diff touches.
+   *
+   * Computed by the caller, because finding them is an async retrieval call and `request` is
+   * synchronous by design. Passing them in rather than fetching them here also keeps `Gates`
+   * unaware of F4: all it does is fold the hash into the payload before hashing, which is the
+   * one thing that has to happen here and nowhere else.
+   */
+  clauses?: { matches: readonly unknown[]; clausesHash: string };
 }
 
 export interface GatesOptions {
@@ -155,8 +164,13 @@ export class Gates {
   request(input: GateRequestInput): string {
     const policy = gatePolicy(input.gate);
     const id = `g_${randomUUID().slice(0, 8)}`;
-    const payloadJson = JSON.stringify(input.payload);
-    const payloadHash = hashPayload(input.payload);
+
+    // §M.8.2 step 5 — the clause set is part of what is hashed, so approval binds to what was
+    // shown. A policy edited before approval changes this hash and the old approval can no
+    // longer execute, which is the whole mechanism.
+    const payload = withClauses(input.payload, input.clauses?.clausesHash);
+    const payloadJson = JSON.stringify(payload);
+    const payloadHash = hashPayload(payload);
     const now = this.#now();
 
     const attached =
@@ -203,6 +217,7 @@ export class Gates {
     if (row.decided_at != null) {
       throw new GateError(`gate ${gateId} was already decided (${row.decision})`);
     }
+    if (decision === 'approve') this.#assertAcked(gateId);
     this.#db
       .prepare('UPDATE gate_request SET decided_at = ?, decision = ?, decided_by = ? WHERE id = ?')
       .run(this.#now(), decision, decidedBy, gateId);
@@ -249,11 +264,70 @@ export class Gates {
       throw new GateError(`gate ${gateId} expired before execution`);
     }
 
-    const actual = hashPayload(payload);
+    // §M.8.2 — the clause set is re-derived from the rows, not taken from the caller.
+    //
+    // This is what makes "policies changed after approval" abort. A policy reload deletes and
+    // recreates its clauses, which cascades the gate's `gate_clause` rows away, so the hash
+    // recomputed here no longer matches the one the human approved. The alternative — trusting
+    // the caller to pass the same clause hash back — would check nothing.
+    const actual = hashPayload(this.#rebind(row.payload_json, payload, gateId));
     if (actual !== row.payload_hash) {
       throw new GateError(
         `gate ${gateId} payload changed after approval: approved ${row.payload_hash.slice(0, 12)}, ` +
           `about to execute ${actual.slice(0, 12)}. Refusing.`,
+      );
+    }
+  }
+
+  /**
+   * Re-folds the current clause hash into a caller's payload, when the gate had one.
+   *
+   * A gate requested on a repo with no policies has no `clauses_hash` in its payload and must
+   * keep hashing exactly as it did before F4 existed — otherwise enabling the feature would
+   * invalidate every approval already in flight.
+   */
+  #rebind(storedJson: string, payload: unknown, gateId: string): unknown {
+    let stored: unknown;
+    try {
+      stored = JSON.parse(storedJson);
+    } catch {
+      return payload;
+    }
+    const hadClauses =
+      stored != null && typeof stored === 'object' && 'clauses_hash' in (stored as object);
+    if (!hadClauses) return payload;
+    return withClauses(payload, this.#currentClausesHash(gateId));
+  }
+
+  #currentClausesHash(gateId: string): string {
+    const rows = this.#db
+      .prepare('SELECT hunk_ref, clause_id FROM gate_clause WHERE gate_id = ?')
+      .all(gateId) as { hunk_ref: string; clause_id: string }[];
+    return hashClauses(rows.map((row) => ({ hunkRef: row.hunk_ref, clauseId: row.clause_id })));
+  }
+
+  /**
+   * §M.8.3 — approve is refused while a `requires_ack` clause is unacknowledged.
+   *
+   * INVARIANT C2: this is the *only* way a clause can block anything, and it exists because a
+   * human wrote `requires_ack: true` into a policy file. No model evaluates compliance, and a
+   * clause that merely matched never stops an approval.
+   *
+   * Enforced here rather than only in the UI: the CLI and an orchestrating agent reach the same
+   * `decide`, and §17's symmetry is worth nothing if the rule lives in one client.
+   */
+  #assertAcked(gateId: string): void {
+    const row = this.#db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM gate_clause gc
+           JOIN policy_clause pc ON pc.id = gc.clause_id
+          WHERE gc.gate_id = ? AND pc.requires_ack = 1 AND gc.acked_at IS NULL`,
+      )
+      .get(gateId) as { n: number } | undefined;
+    const outstanding = row?.n ?? 0;
+    if (outstanding > 0) {
+      throw new GateError(
+        `gate ${gateId} has ${outstanding} policy clause(s) that must be acknowledged before approval`,
       );
     }
   }
@@ -288,6 +362,7 @@ export class Gates {
     executed_at: number | null;
     requested_at: number;
     payload_hash: string;
+    payload_json: string;
   } {
     const row = this.#db.prepare('SELECT * FROM gate_request WHERE id = ?').get(gateId) as
       | {
@@ -296,11 +371,53 @@ export class Gates {
           executed_at: number | null;
           requested_at: number;
           payload_hash: string;
+          payload_json: string;
         }
       | undefined;
     if (!row) throw new GateError(`unknown gate ${gateId}`);
     return row;
   }
+}
+
+/**
+ * The hash of the sorted `(hunk_ref, clause_id)` pairs — OSADE-MOSS §M.8.2 step 5.
+ *
+ * Sorted, so the hash does not depend on retrieval's ordering: two runs that surface the same
+ * clauses in a different order must produce the same payload, or an approval would be voided by
+ * nothing more than a reranking.
+ *
+ * `score` is deliberately **not** in the hash. It is advisory and drifts with the index; what
+ * the human approved is *which clauses were shown*, and binding to a float would make
+ * approvals expire for reasons nobody could explain.
+ *
+ * It lives here rather than in `gate-clauses.ts` so the dependency runs one way: the clause
+ * finder knows about gates, and gates know nothing about retrieval.
+ */
+export function hashClauses(pairs: readonly { hunkRef: string; clauseId: string }[]): string {
+  const joined = pairs
+    .map((pair) => `${pair.hunkRef}\u0000${pair.clauseId}`)
+    .sort()
+    .join('\n');
+  return createHash('sha256').update(joined).digest('hex').slice(0, 32);
+}
+
+/**
+ * Folds the clause hash into the payload.
+ *
+ * **An empty clause set is still bound**, and deliberately: "no policy matched this diff" is a
+ * fact the approver relied on. If a policy is added afterwards that *would* have matched, the
+ * set changes, the hash changes, and the approval correctly stops being executable.
+ *
+ * What is not bound is a gate requested with no clause argument at all — the path a caller
+ * takes when F4 is not wired in. Those hash exactly as they did before this feature existed,
+ * so enabling it cannot invalidate approvals already in flight.
+ */
+function withClauses(payload: unknown, clausesHash: string | undefined): unknown {
+  if (clausesHash == null) return payload;
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { payload, clauses_hash: clausesHash };
+  }
+  return { ...(payload as Record<string, unknown>), clauses_hash: clausesHash };
 }
 
 /** §9.1 — undo_turn is conditional: a human decides once the diff is large. */

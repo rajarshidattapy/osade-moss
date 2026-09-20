@@ -83,6 +83,28 @@ const NO_STORED_STATUS = [
   },
 ];
 
+/**
+ * OSADE-MOSS §M.1.4 R1 — Moss is a derived view with exactly one writer.
+ *
+ * The indexer is the only module allowed to call `upsert` or `remove` on a `RetrievalPort`. A
+ * second writer would put facts in the index that are in no fact table, and `osade index
+ * rebuild` — the defined recovery for every failure in §M.10 — would start destroying data
+ * instead of restoring it. Restricting it by name rather than by type because that is what a
+ * linter can see.
+ */
+const NO_RETRIEVAL_WRITE_OUTSIDE_INDEXER = [
+  {
+    selector: 'CallExpression[callee.property.name="upsert"]',
+    message:
+      'OSADE-MOSS §M.1.4 R1: only retrieval/indexer.ts writes to the index. Write the fact to SQLite; the indexer projects it.',
+  },
+  {
+    selector: 'CallExpression[callee.property.name="remove"][arguments.length=2]',
+    message:
+      'OSADE-MOSS §M.1.4 R1: only retrieval/indexer.ts removes from the index. Delete the fact row; the indexer follows.',
+  },
+];
+
 const BASE_SELECTORS = [NO_ENV_DESTRUCTURE, NO_PROCESS_BINDING_IMPORT, NO_RAW_ORCHESTRATOR_ID];
 
 export default tseslint.config(
@@ -118,8 +140,13 @@ export default tseslint.config(
             'OSADE.md §20.1: the daemon is a library. Throw; only cli.ts may exit the process.',
         },
       ],
-      // §5.4 folded in, because this scope covers the daemon's services.
-      'no-restricted-syntax': ['error', ...BASE_SELECTORS, NO_DIRECT_WS_EMIT],
+      // §5.4 and OSADE-MOSS R1 folded in, because this scope covers the daemon's services.
+      'no-restricted-syntax': [
+        'error',
+        ...BASE_SELECTORS,
+        NO_DIRECT_WS_EMIT,
+        ...NO_RETRIEVAL_WRITE_OUTSIDE_INDEXER,
+      ],
     },
   },
 
@@ -129,7 +156,20 @@ export default tseslint.config(
       'packages/daemon/src/server/cdc-broadcaster.ts',
       'packages/daemon/src/server/index.ts',
     ],
-    rules: { 'no-restricted-syntax': ['error', ...BASE_SELECTORS] },
+    rules: {
+      'no-restricted-syntax': ['error', ...BASE_SELECTORS, ...NO_RETRIEVAL_WRITE_OUTSIDE_INDEXER],
+    },
+  },
+
+  // R1's one writer, and the adapters that *implement* the methods it calls.
+  {
+    files: [
+      'packages/daemon/src/retrieval/indexer.ts',
+      'packages/daemon/src/retrieval/fts5-adapter.ts',
+      'packages/daemon/src/retrieval/moss-adapter.ts',
+      'packages/daemon/src/retrieval/fake.ts',
+    ],
+    rules: { 'no-restricted-syntax': ['error', ...BASE_SELECTORS, NO_DIRECT_WS_EMIT] },
   },
 
   // ── one boundary to the substrate (§4.2) ──────────────────────────────────
@@ -163,6 +203,16 @@ export default tseslint.config(
               group: ['octokit', '@octokit/*'],
               message: 'OSADE.md §11: only packages/daemon/src/scm/** may import an SCM SDK.',
             },
+            {
+              group: ['@moss-js/*', '@moss-dev/*'],
+              message:
+                'OSADE-MOSS §M.1.2: only packages/daemon/src/retrieval/** may import a Moss SDK. Use the RetrievalPort.',
+            },
+            {
+              group: ['web-tree-sitter', '@vscode/tree-sitter-wasm', 'tree-sitter-*'],
+              message:
+                'OSADE-MOSS §M.5.4: only packages/daemon/src/knowledge/code/** may import a parser. Use chunkRepo.',
+            },
           ],
         },
       ],
@@ -179,6 +229,26 @@ export default tseslint.config(
   // ── one boundary to GitHub (§11) ──────────────────────────────────────────
   {
     files: ['packages/daemon/src/scm/**/*.ts'],
+    rules: { 'no-restricted-imports': 'off' },
+  },
+
+  // ── one boundary to the parser (OSADE-MOSS §M.5.4) ────────────────────────
+  //
+  // The WASM grammar is the riskiest dependency F1 has — the first runtime/grammar pairing
+  // tried did not load at all — so it lives behind one door, like Moss and Octokit.
+  {
+    files: ['packages/daemon/src/knowledge/code/**/*.ts'],
+    rules: { 'no-restricted-imports': 'off' },
+  },
+
+  // ── one boundary to Moss (OSADE-MOSS §M.1.2) ──────────────────────────────
+  //
+  // Exempted the same way `scm/**` is, rather than as a second `no-restricted-imports` block:
+  // flat config *replaces* a rule's options, so a second block naming the rule would silently
+  // drop every pattern above. That is not hypothetical — it broke the §4.2 and §11 boundaries
+  // when this seam was first added, and `lint-rules.test.ts` is what caught it.
+  {
+    files: ['packages/daemon/src/retrieval/**/*.ts'],
     rules: { 'no-restricted-imports': 'off' },
   },
 

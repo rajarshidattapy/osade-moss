@@ -51,6 +51,21 @@ export interface VerifyRunnerOptions {
    * which already depends on plenty.
    */
   sendToAgent?: (taskId: string, text: string) => Promise<void>;
+  /**
+   * OSADE-MOSS §M.5.5 / §M.5.8 — what the lane learned from this run.
+   *
+   * Injected for the same reason `sendToAgent` is: the runner must not depend on F1. It is
+   * awaited but never allowed to fail the run — a learner that throws is logged and the
+   * verification result stands.
+   */
+  onRunFinished?: (run: {
+    runId: string;
+    taskId: string;
+    exitCode: number | null;
+    required: boolean;
+    headSha: string;
+    logPath: string;
+  }) => Promise<void>;
 }
 
 export class VerifyRunner {
@@ -59,6 +74,7 @@ export class VerifyRunner {
   readonly #now: () => number;
   readonly #onWarning: (message: string) => void;
   readonly #sendToAgent: ((taskId: string, text: string) => Promise<void>) | null;
+  readonly #onRunFinished: VerifyRunnerOptions['onRunFinished'] | null;
 
   constructor(db: Db, substrate: SubstrateClient, options: VerifyRunnerOptions = {}) {
     this.#db = db;
@@ -66,6 +82,7 @@ export class VerifyRunner {
     this.#now = options.now ?? Date.now;
     this.#onWarning = options.onWarning ?? (() => {});
     this.#sendToAgent = options.sendToAgent ?? null;
+    this.#onRunFinished = options.onRunFinished ?? null;
   }
 
   /**
@@ -202,6 +219,19 @@ export class VerifyRunner {
     this.#db
       .prepare('UPDATE verify_run SET finished_at = ?, exit_code = ? WHERE id = ?')
       .run(this.#now(), exitCode, runId);
+
+    // The row is final before anyone learns from it: a learner reads `call_site` and the
+    // worktree diff, and both are only meaningful once this run is recorded as finished.
+    await this.#onRunFinished?.({
+      runId,
+      taskId,
+      exitCode,
+      required: step.required,
+      headSha,
+      logPath,
+    }).catch((err: Error) => {
+      this.#onWarning(`learning from verify run ${runId} failed: ${err.message}`);
+    });
 
     return { runId, stepName: step.name, exitCode, required: step.required, logPath };
   }

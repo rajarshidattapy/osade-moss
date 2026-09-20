@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { TaskView } from '@osade/contract';
+import type {
+  DiscoveryMiss,
+  GateClauseView,
+  MigrationMetrics,
+  MigrationView,
+  PolicyReloadResult,
+  RetrievalStats,
+  TaskView,
+} from '@osade/contract';
 
 /**
  * A tiny tRPC-over-HTTP client for the `osade` CLI.
@@ -110,4 +118,67 @@ export const api = {
     }>,
   taskArchive: (taskId: string) =>
     call('mutation', 'taskArchive', { taskId }) as Promise<{ ok: true }>,
+
+  /** §M.1.7 — the degraded-retrieval badge's data, in a terminal. */
+  retrievalStats: () => call('query', 'retrievalStats', undefined) as Promise<RetrievalStats>,
+  indexRebuild: (input: { ns?: string }) =>
+    call('mutation', 'indexRebuild', input) as Promise<{ indexed: number }>,
+
+  // §M.5 — F1. The CLI mirrors the procedures (§17 symmetry): anything the window can drive,
+  // a terminal can drive, and an orchestrator agent has no privileged path either.
+  migrationCreate: (input: {
+    provider: string;
+    package: string;
+    fromVersion?: string | null;
+    toVersion: string;
+    changelogText: string;
+  }) => call('mutation', 'migrationCreate', input) as Promise<{ migrationId: string }>,
+  migrationExtract: (migrationId: string) =>
+    call('mutation', 'migrationExtract', { migrationId }) as Promise<{
+      kept: number;
+      dropped: number;
+    }>,
+  migrationAddChange: (input: {
+    migrationId: string;
+    kind: string;
+    oldSymbol?: string;
+    newSymbol?: string;
+    description: string;
+  }) => call('mutation', 'migrationAddChange', input) as Promise<{ changeId: string }>,
+  migrationChangesConfirm: (migrationId: string) =>
+    call('mutation', 'migrationChangesConfirm', { migrationId }) as Promise<{ ok: true }>,
+  migrationTargetsSet: (migrationId: string, repoIds: string[]) =>
+    call('mutation', 'migrationTargetsSet', { migrationId, repoIds }) as Promise<{ ok: true }>,
+  migrationChunk: (migrationId: string) =>
+    call('mutation', 'migrationChunk', { migrationId }) as Promise<{
+      chunks: number;
+      unparsed: string[];
+    }>,
+  migrationDiscover: (migrationId: string) =>
+    call('mutation', 'migrationDiscover', { migrationId }) as Promise<{
+      sites: number;
+      queryMs: number;
+    }>,
+  migrationLaunchWave: (migrationId: string, wave: number) =>
+    call('mutation', 'migrationLaunchWave', { migrationId, wave }) as Promise<{
+      launched: string[];
+      deferred: string[];
+    }>,
+  migrationView: (migrationId: string) =>
+    call('query', 'migrationView', { migrationId }) as Promise<MigrationView | null>,
+  migrationMetrics: (migrationId: string) =>
+    call('query', 'migrationMetrics', { migrationId }) as Promise<MigrationMetrics>,
+  migrationMisses: (migrationId: string) =>
+    call('query', 'migrationMisses', { migrationId }) as Promise<DiscoveryMiss[]>,
+  migrationMissesExport: (migrationId: string, dir: string) =>
+    call('mutation', 'migrationMissesExport', { migrationId, dir }) as Promise<{
+      written: string[];
+    }>,
+
+  // §M.8 — F4.
+  policyReload: () => call('mutation', 'policyReload', undefined) as Promise<PolicyReloadResult>,
+  gateClauses: (gateId: string) =>
+    call('query', 'gateClauses', { gateId }) as Promise<GateClauseView>,
+  gateClauseAck: (gateId: string, clauseId: string) =>
+    call('mutation', 'gateClauseAck', { gateId, clauseId }) as Promise<GateClauseView>,
 };

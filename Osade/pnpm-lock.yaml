@@ -100,6 +100,9 @@ importers:
       '@trpc/server':
         specifier: ^11.18.0
         version: 11.18.0(typescript@5.9.3)
+      '@vscode/tree-sitter-wasm':
+        specifier: ^0.3.1
+        version: 0.3.1
       better-sqlite3:
         specifier: ^11.7.0
         version: 11.10.0
@@ -109,6 +112,9 @@ importers:
       octokit:
         specifier: ^4.1.4
         version: 4.1.4
+      web-tree-sitter:
+        specifier: ^0.27.0
+        version: 0.27.0
       ws:
         specifier: ^8.21.3
         version: 8.21.3
@@ -125,6 +131,10 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+    optionalDependencies:
+      '@moss-js/moss':
+        specifier: ^1.11.0
+        version: 1.11.0
 
 packages:
 
@@ -797,6 +807,46 @@ packages:
     resolution: {integrity: sha512-9QOtNffcOF/c1seMCDnjckb3R9WHcG34tky+FHpNKKCW0wc/scYLwMtO+ptyGUfMW0/b/n4qRiALlaFHc9Oj7Q==}
     engines: {node: '>= 10.0.0'}
 
+  '@moss-js/moss-core-darwin-arm64@0.26.0':
+    resolution: {integrity: sha512-UTAHlsNwX0RtVTezFHMuKDdRrbtpsVS6Xl2oC93h+KpMoteFIt+w7cuOy92JVhmnTkyliGFRb1OXsos2C0t2ZQ==}
+    engines: {node: '>=20'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@moss-js/moss-core-darwin-x64@0.26.0':
+    resolution: {integrity: sha512-mXcETTFKYP+YYuFuVIDgZBd0wkGTOI0jaaixaIF9Nfkk/3Icq9D3iFuYn3dXdqNyEuVajiND4zmecMpxWjG7+w==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@moss-js/moss-core-linux-arm64-gnu@0.26.0':
+    resolution: {integrity: sha512-wTSVaCSzeKaXy9uICzhxQmiV87VtIgJM+96ZZvKcCOGGIqVk6X0hODQx9c4SSWw0HMe7ckWEGc/hg0rTLELWTw==}
+    engines: {node: '>=20'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@moss-js/moss-core-linux-x64-gnu@0.26.0':
+    resolution: {integrity: sha512-Qr3fJHKcZFV+5LBzqsi+DmEN4efB4v/eZuEoWrIkAzOkMzhx3SOD+AK00UPrnK7gNrFoImr04bxlXKDbQbEpcQ==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@moss-js/moss-core-win32-x64-msvc@0.26.0':
+    resolution: {integrity: sha512-eB5hIzy/JRy5d5nfOZCdS+UGt2WdvGkFpeAeSMx5xxFOwtuNCZE47aZduzwkPIlt5F1Z/8AFrvB2odJXmsqEYQ==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [win32]
+
+  '@moss-js/moss-core@0.26.0':
+    resolution: {integrity: sha512-aoBAKHS0hdZn2E6Npce4TGXGXDqDwm/2d+6l47F2EwcH8SCHoS34lYiV4+Lw6mXDwH3Io7yYvLo0sPwYZkmEWw==}
+    engines: {node: '>=20'}
+
+  '@moss-js/moss@1.11.0':
+    resolution: {integrity: sha512-T3KKODffQONw5Ql5Me1FmgGhPBCzW+WU28KfSKM1Rl6751k7ZAWiol8RrSEqS0ml1jhRabFmL/3JoWvPfXVzug==}
+    engines: {node: '>=20.4'}
+
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     resolution: {integrity: sha512-oTXEIha4SsuXdTA4Iyskj0kpdx2yVXdhd75c2v3xGrHFfVMsbhTPZU/nMPL4sWKo4pBHm3aucLaqGlF696dTyQ==}
     engines: {node: ^22.20 || ^24.12 || >=25}
@@ -1352,6 +1402,9 @@ packages:
 
   '@vitest/utils@2.1.9':
     resolution: {integrity: sha512-v0psaMSkNJ3A2NMrUEHFRzJtDPFn+/VWZ5WxImB21T9fjucJRmS7xCS3ppEnARb9y11OAzaD+P2Ps+b+BGX5iQ==}
+
+  '@vscode/tree-sitter-wasm@0.3.1':
+    resolution: {integrity: sha512-RJFoomET6FajjG511fmQxeBQfU6M24a0aFZPqpid+ttIxanWf1VGytBG0UmsGjt07qmIPJS8U31D+aecuCucsQ==}
 
   '@xmldom/xmldom@0.8.15':
     resolution: {integrity: sha512-/5NV/vDALVFDXgLmfsy9TRCBlKwO2LNBFzpzvb9iIj+jR+eSc6DLYYvVOdivT/jm7MtU6TebYuRmzEOI7w40UA==}
@@ -2967,6 +3020,9 @@ packages:
       jsdom:
         optional: true
 
+  web-tree-sitter@0.27.0:
+    resolution: {integrity: sha512-XK08gj6RwTMQatAG7uVRP8MunqotL/XC19vHgkSPKmELgbGPBj4ECvB8haHOUnyj6ls2B8t42UTro14zxGgAHg==}
+
   webcrypto-core@1.9.2:
     resolution: {integrity: sha512-gsXecm82UQNlTBURJGuqOWy1Ww08S3kZUcr3aOJS02Pk0xLtkfeUAVC0u0xhgdonFme80edSJUIJyuvL/7250Q==}
 
@@ -3594,6 +3650,35 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@moss-js/moss-core-darwin-arm64@0.26.0':
+    optional: true
+
+  '@moss-js/moss-core-darwin-x64@0.26.0':
+    optional: true
+
+  '@moss-js/moss-core-linux-arm64-gnu@0.26.0':
+    optional: true
+
+  '@moss-js/moss-core-linux-x64-gnu@0.26.0':
+    optional: true
+
+  '@moss-js/moss-core-win32-x64-msvc@0.26.0':
+    optional: true
+
+  '@moss-js/moss-core@0.26.0':
+    optionalDependencies:
+      '@moss-js/moss-core-darwin-arm64': 0.26.0
+      '@moss-js/moss-core-darwin-x64': 0.26.0
+      '@moss-js/moss-core-linux-arm64-gnu': 0.26.0
+      '@moss-js/moss-core-linux-x64-gnu': 0.26.0
+      '@moss-js/moss-core-win32-x64-msvc': 0.26.0
+    optional: true
+
+  '@moss-js/moss@1.11.0':
+    dependencies:
+      '@moss-js/moss-core': 0.26.0
+    optional: true
+
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
@@ -4133,6 +4218,8 @@ snapshots:
       '@vitest/pretty-format': 2.1.9
       loupe: 3.2.1
       tinyrainbow: 1.2.0
+
+  '@vscode/tree-sitter-wasm@0.3.1': {}
 
   '@xmldom/xmldom@0.8.15': {}
 
@@ -5864,6 +5951,8 @@ snapshots:
       - sugarss
       - supports-color
       - terser
+
+  web-tree-sitter@0.27.0: {}
 
   webcrypto-core@1.9.2:
     dependencies:

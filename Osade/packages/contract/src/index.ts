@@ -9,4 +9,7 @@ export * from './primitives.js';
 export * from './facts.js';
 export * from './ws.js';
 export * from './conventions.js';
+export * from './retrieval.js';
+export * from './migration.js';
+export * from './compliance.js';
 export * from './orchestrator-id.js';

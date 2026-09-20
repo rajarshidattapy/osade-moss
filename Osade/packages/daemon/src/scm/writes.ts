@@ -3,6 +3,7 @@ import { getTask } from '../db/task-repo.js';
 import { taskCwd } from '../domain/cwd.js';
 import { git } from '../domain/git.js';
 import { Gates, type GateName } from '../domain/gates.js';
+import { DIFF_BEARING, type GateClauses } from '../domain/gate-clauses.js';
 import { ScmClient, ScmError } from './client.js';
 
 /**
@@ -39,6 +40,14 @@ export interface PushPayload {
 export interface ScmWritesOptions {
   now?: () => number;
   onWarning?: (message: string) => void;
+  /**
+   * OSADE-MOSS §M.8.2 — finds the policy clauses a diff-bearing gate touches.
+   *
+   * Optional: a daemon with no policies behaves exactly as before, and the gate payload keeps
+   * hashing the way it always did. Injected rather than imported so this module stays unaware
+   * of retrieval.
+   */
+  clauses?: GateClauses | null;
 }
 
 interface RepoRow {
@@ -70,6 +79,7 @@ export class ScmWrites {
   readonly #gates: Gates;
   readonly #now: () => number;
   readonly #onWarning: (message: string) => void;
+  readonly #clauses: GateClauses | null;
 
   constructor(db: Db, scm: ScmClient, gates: Gates, options: ScmWritesOptions = {}) {
     this.#db = db;
@@ -77,6 +87,7 @@ export class ScmWrites {
     this.#gates = gates;
     this.#now = options.now ?? Date.now;
     this.#onWarning = options.onWarning ?? (() => {});
+    this.#clauses = options.clauses ?? null;
   }
 
   /**
@@ -228,8 +239,25 @@ export class ScmWrites {
   }
 
   /** Requests a gate for a write. Nothing happens until it is approved. */
-  requestGate(taskId: string, gate: GateName, payload: unknown): string {
-    return this.#gates.request({ taskId, gate, payload });
+  /**
+   * §M.8.2 — requests a gate, computing its policy clauses first when the gate carries a diff.
+   *
+   * The clause set is found *before* the gate exists, because its hash is part of the payload
+   * that gets hashed. The rows are written immediately after, against the new gate id. Both
+   * halves are needed: the hash binds the approval, and the rows are what the card renders.
+   */
+  async requestGate(taskId: string, gate: GateName, payload: unknown): Promise<string> {
+    const clauses =
+      this.#clauses && DIFF_BEARING.has(gate) ? await this.#clauses.forTask(taskId) : null;
+
+    const gateId = this.#gates.request({
+      taskId,
+      gate,
+      payload,
+      ...(clauses ? { clauses } : {}),
+    });
+    if (clauses) this.#clauses?.record(gateId, clauses);
+    return gateId;
   }
 
   /**
