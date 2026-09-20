@@ -3,13 +3,21 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  AttestationCheck,
+  AuditRow,
+  CatchUpItem,
+  CatchUpResult,
   DiscoveryMiss,
   GateClauseView,
   MigrationMetrics,
   MigrationView,
+  Member,
   PolicyReloadResult,
   RetrievalStats,
+  SessionGrant,
+  ShareInfo,
   TaskView,
+  TriageRow,
 } from '@osade/contract';
 
 /**
@@ -181,4 +189,26 @@ export const api = {
     call('query', 'gateClauses', { gateId }) as Promise<GateClauseView>,
   gateClauseAck: (gateId: string, clauseId: string) =>
     call('mutation', 'gateClauseAck', { gateId, clauseId }) as Promise<GateClauseView>,
+// §M.6 — F2. Identity, roles and catching up.
+  authExchange: (githubToken: string) =>
+    call('mutation', 'authExchange', { githubToken }) as Promise<SessionGrant>,
+  memberList: () => call('query', 'memberList', undefined) as Promise<Member[]>,
+  memberInvite: (login: string, role: string) =>
+    call('mutation', 'memberInvite', { login, role }) as Promise<{ ok: true }>,
+  memberRemove: (login: string) =>
+    call('mutation', 'memberRemove', { login }) as Promise<{ ok: true }>,
+  catchUp: (chatId: string) => call('query', 'catchUp', { chatId }) as Promise<CatchUpResult>,
+  askHistory: (chatId: string, question: string) =>
+    call('query', 'askHistory', { chatId, question }) as Promise<CatchUpItem[]>,
+  shareInfo: () => call('query', 'shareInfo', undefined) as Promise<ShareInfo>,
+
+  // §M.7 — F3. Attestation and the maintainer's triage list.
+  attestationVerify: (input: { body: string; currentHead: string; attestorsJson?: string }) =>
+    call('query', 'attestationVerify', input) as Promise<AttestationCheck>,
+  prSignals: (repoId: string) => call('query', 'prSignals', { repoId }) as Promise<TriageRow[]>,
+
+  // §M.8.4 — the audit trail.
+  auditExport: (input: { since: number; until?: number; repoId?: string }) =>
+    call('query', 'auditExport', input) as Promise<AuditRow[]>,
 };
+

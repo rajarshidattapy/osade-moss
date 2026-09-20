@@ -18,6 +18,10 @@ import { MigrationService } from './domain/migration.js';
 import { FixPatterns } from './domain/fix-patterns.js';
 import { GateClauses } from './domain/gate-clauses.js';
 import { reloadPolicies } from './knowledge/policies.js';
+import { Attestations } from './attest/service.js';
+import { Members } from './server/members.js';
+import { CatchUp } from './server/catch-up.js';
+import { PrSignals } from './scm/signals.js';
 import { ContextAssembler } from './retrieval/assembler.js';
 import { RetrievalService } from './retrieval/service.js';
 import { SubstrateClient } from './substrate/client.js';
@@ -138,7 +142,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     assembler,
   });
   launch = launcher;
-  const gates = new Gates(db, { now: options.now });
+  // A1 — the head resolver is late-bound because `ScmWrites` (which owns the one definition
+  // of "this lane's head") is constructed below, after the launcher it depends on.
+  let scmWritesRef: ScmWrites | null = null;
+  const gates = new Gates(db, {
+    now: options.now,
+    resolveHead: (taskId) => scmWritesRef?.headSha(taskId) ?? Promise.resolve(null),
+  });
   // §10.2 — the failure loop. Wired here rather than inside the runner so the dependency
   // points one way: the runner knows nothing about launching.
   // §M.5.5 / §M.5.8 — what a lane learns when verification settles. A pass publishes verified
@@ -161,7 +171,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   // §11 — GitHub. The token reaches us over the spawn handshake and is held in memory only
   // (§2.1); nothing writes it to disk.
   const scm = new ScmClient({ token: process.env.OSADE_GITHUB_TOKEN, now: options.now, onWarning });
-  const scmWrites = new ScmWrites(db, scm, gates, { now: options.now, onWarning, clauses });
+  // §M.7.2 — F3. The signing key is generated lazily, so a daemon that never opens a pull
+  // request never writes one to disk.
+  const attest = new Attestations(db, { now: options.now, onWarning });
+  const scmWrites = new ScmWrites(db, scm, gates, {
+    now: options.now,
+    onWarning,
+    clauses,
+    attest,
+  });
+  scmWritesRef = scmWrites;
   const triage = new Triage(db, launcher, { now: options.now });
   const poller = new ScmPoller(db, scm, {
     now: options.now,
@@ -194,6 +213,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     headless,
   });
 
+  // §M.6.2 — F2. Identity is GitHub's; a teammate's token is verified once and discarded.
+  // `identify` is injected so this module, not `members.ts`, is the one that knows about SCM.
+  const members = new Members(db, {
+    now: options.now,
+    identify: (token) => scm.loginFor(token),
+  });
+  const catchUp = new CatchUp(db, retrieval, { now: options.now });
+
+  // §M.7.5 — F3's maintainer half. A2: it records signals and never acts on them publicly.
+  const signals = new PrSignals(db, retrieval, { now: options.now, onWarning });
+
   const server = await startDaemonServer({
     db,
     launcher,
@@ -207,6 +237,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     retrieval,
     migrations,
     clauses,
+    attest,
+    members,
+    catchUp,
+    signals,
+    listenMode: config.server.listen,
     port: options.port,
     now: options.now,
     onWarning,

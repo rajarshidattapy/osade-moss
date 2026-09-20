@@ -19,21 +19,38 @@ export const OrgId = z.string().min(1);
 export type OrgId = z.infer<typeof OrgId>;
 
 /**
+ * The substrate's public id alphabet — `backend/src/workspace.rs:105`.
+ *
+ * **Not decimal.** The substrate encodes workspace, tab and pane numbers in a 32-character
+ * Crockford-style alphabet (`123456789ABCDEFGHJKMNPQRSTVWXYZ0`, omitting I, L, O and U), so the
+ * tenth workspace is `wA` and the thirty-third is `w11`. A `\d+` pattern accepts the first
+ * nine and rejects everything after — which is invisible until someone opens a tenth workspace,
+ * and then every launch fails validation.
+ */
+const PUBLIC_NUMBER = '[0-9A-HJKMNP-TV-Z]+';
+
+/**
  * the substrate's public workspace id, e.g. `w3`.
  *
  * OSADE.md §5.2 — a durable key, stable across other workspaces closing and across a substrate
  * restart. Always the full `wN` form: `parse_workspace_id` has a positional fallback for bare
  * integers, so sending `"3"` can resolve to a different workspace.
  */
-export const SubstrateWorkspaceId = z.string().regex(/^w\d+$/, 'expected the substrate workspace id like w3');
+export const SubstrateWorkspaceId = z
+  .string()
+  .regex(new RegExp(`^w${PUBLIC_NUMBER}$`), 'expected the substrate workspace id like w3');
 export type SubstrateWorkspaceId = z.infer<typeof SubstrateWorkspaceId>;
 
 /** substrate's public tab id, e.g. `w3:t2`. */
-export const SubstrateTabId = z.string().regex(/^w\d+:t\d+$/, 'expected the substrate tab id like w3:t2');
+export const SubstrateTabId = z
+  .string()
+  .regex(new RegExp(`^w${PUBLIC_NUMBER}:t${PUBLIC_NUMBER}$`), 'expected the substrate tab id like w3:t2');
 export type SubstrateTabId = z.infer<typeof SubstrateTabId>;
 
 /** substrate's public pane id, e.g. `w3:p2`. The key for a status subscription (§7.2). */
-export const SubstratePaneId = z.string().regex(/^w\d+:p\d+$/, 'expected the substrate pane id like w3:p2');
+export const SubstratePaneId = z
+  .string()
+  .regex(new RegExp(`^w${PUBLIC_NUMBER}:p${PUBLIC_NUMBER}$`), 'expected the substrate pane id like w3:p2');
 export type SubstratePaneId = z.infer<typeof SubstratePaneId>;
 
 /**

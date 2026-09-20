@@ -24,7 +24,7 @@ const payload: OpenPrPayload = {
   body: 'Closes #417.',
   head: 'osade/fix',
   base: 'main',
-  draft: false,
+  draft: false, head_sha: 'a1c0ffee',
 };
 
 let db: Db;

@@ -1,9 +1,12 @@
 import type { Db } from '../db/index.js';
 import { getTask } from '../db/task-repo.js';
 import { taskCwd } from '../domain/cwd.js';
-import { git } from '../domain/git.js';
+import { git, resolveSha } from '../domain/git.js';
 import { Gates, type GateName } from '../domain/gates.js';
-import { DIFF_BEARING, type GateClauses } from '../domain/gate-clauses.js';
+import { DIFF_BEARING } from '../domain/gates.js';
+import type { GateClauses } from '../domain/gate-clauses.js';
+import type { Attestations } from '../attest/service.js';
+import { withBlock } from '../attest/statement.js';
 import { ScmClient, ScmError } from './client.js';
 
 /**
@@ -25,6 +28,13 @@ export interface OpenPrPayload {
   head: string;
   base: string;
   draft: boolean;
+  /**
+   * A1 (OSADE-MOSS §M.7.1) — the exact commit this approval is for.
+   *
+   * Required, not optional: without it an agent could add commits between approval and
+   * execution and the PR would open against code no human ever saw.
+   */
+  head_sha: string;
 }
 
 export interface CommentPayload {
@@ -35,6 +45,8 @@ export interface PushPayload {
   remote: string;
   branch: string;
   force: boolean;
+  /** A1 — the exact commit being pushed, re-read from the branch before the push runs. */
+  head_sha: string;
 }
 
 export interface ScmWritesOptions {
@@ -48,6 +60,13 @@ export interface ScmWritesOptions {
    * of retrieval.
    */
   clauses?: GateClauses | null;
+  /**
+   * §M.7.2 — issues the attestation for an approved diff-bearing gate.
+   *
+   * Optional: a daemon without it opens pull requests exactly as before, with no block in the
+   * body and no commit status. Injected so this module does not depend on the signing seam.
+   */
+  attest?: Attestations | null;
 }
 
 interface RepoRow {
@@ -80,6 +99,7 @@ export class ScmWrites {
   readonly #now: () => number;
   readonly #onWarning: (message: string) => void;
   readonly #clauses: GateClauses | null;
+  readonly #attest: Attestations | null;
 
   constructor(db: Db, scm: ScmClient, gates: Gates, options: ScmWritesOptions = {}) {
     this.#db = db;
@@ -88,6 +108,7 @@ export class ScmWrites {
     this.#now = options.now ?? Date.now;
     this.#onWarning = options.onWarning ?? (() => {});
     this.#clauses = options.clauses ?? null;
+    this.#attest = options.attest ?? null;
   }
 
   /**
@@ -239,6 +260,28 @@ export class ScmWrites {
   }
 
   /** Requests a gate for a write. Nothing happens until it is approved. */
+
+  /**
+   * A1 — the commit a lane is currently at.
+   *
+   * **One definition, used twice**: the caller pins this into the gate payload at request
+   * time, and `Gates` calls the very same function to re-read the branch before the write.
+   * Two implementations of "what is this lane's head" would eventually disagree, and the one
+   * place that would show up is an approval silently executing against the wrong commit.
+   *
+   * Null when there is no resolvable head — an unborn branch, a task whose worktree is gone.
+   * The caller decides what that means; here it is simply not knowable.
+   */
+  async headSha(taskId: string): Promise<string | null> {
+    const task = getTask(this.#db, taskId);
+    if (!task) return null;
+    try {
+      return await resolveSha(cwdFor(this.#db, task), 'HEAD');
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * §M.8.2 — requests a gate, computing its policy clauses first when the gate carries a diff.
    *
@@ -267,8 +310,9 @@ export class ScmWrites {
    * to git here is the same carve-out §1 grants for `prune`, `status` and `diff`.
    */
   async push(taskId: string, gateId: string, payload: PushPayload): Promise<void> {
-    // §11.2 — re-hashed at execution. An approval is bound to these exact bytes.
-    this.#gates.assertExecutable(gateId, payload);
+    // §11.2 re-hash, plus A1's re-read of the branch head. A push is the first write that
+    // leaves the machine, so it is the last place the pin can still be checked cheaply.
+    await this.#gates.assertExecutableNow(gateId, payload);
 
     const task = getTask(this.#db, taskId);
     if (!task) throw new ScmError(`unknown task ${taskId}`, 0);
@@ -295,7 +339,16 @@ export class ScmWrites {
     gateId: string,
     payload: OpenPrPayload,
   ): Promise<{ number: number; url: string }> {
-    this.#gates.assertExecutable(gateId, payload);
+    await this.#gates.assertExecutableNow(gateId, payload);
+
+    // §M.7.2 — the attestation is issued here, between the head re-read and the GitHub call.
+    //
+    // The ordering is the guarantee. Issued earlier it could name a commit the re-read was
+    // about to reject; issued later there would be a window in which a PR exists without one.
+    // A write that then fails leaves an attestation with no PR, which is harmless — but a PR
+    // can never exist without an attestation, because the body carries it.
+    const attestation = this.#attest?.issue(gateId) ?? null;
+    const body = attestation ? withBlock(payload.body, attestation.block) : payload.body;
 
     const plan = await this.planFork(taskId);
     try {
@@ -305,7 +358,7 @@ export class ScmWrites {
           owner: plan.prOwner,
           repo: plan.prRepo,
           title: payload.title,
-          body: payload.body,
+          body,
           head: payload.head,
           base: payload.base,
           draft: payload.draft,
@@ -326,6 +379,10 @@ export class ScmWrites {
                                               fetch_failed_at = NULL`,
         )
         .run(taskId, pr.number, pr.html_url, pr.head?.sha ?? null, payload.draft ? 1 : 0, this.#now());
+
+      if (attestation) {
+        await this.#postApprovalStatus(plan, payload.head_sha, attestation.statement.approved_by);
+      }
 
       this.#gates.markExecuted(gateId);
       return { number: pr.number, url: pr.html_url };
@@ -371,6 +428,59 @@ export class ScmWrites {
     return (
       (this.#db.prepare('SELECT * FROM repo WHERE id = ?').get(task.repo_id) as RepoRow) ?? null
     );
+  }
+
+  /**
+   * §M.7.3 — the `osade/human-approved` commit status.
+   *
+   * The Statuses API rather than a check run: check runs need a GitHub App, and this has to
+   * work with the user token Osade already holds. It is written inside the already-approved
+   * `gate.pr_open` — part of what the human approved, since the approval covered the PR body
+   * that carries the same claim — and never as a separate unapproved act.
+   *
+   * Best-effort: a status that fails to post must not undo a pull request that already exists.
+   */
+  async #postApprovalStatus(
+    plan: { prOwner: string; prRepo: string },
+    headSha: string,
+    approvedBy: string,
+  ): Promise<void> {
+    try {
+      await this.#scm.write('POST /repos/{owner}/{repo}/statuses/{sha}', {
+        owner: plan.prOwner,
+        repo: plan.prRepo,
+        sha: headSha,
+        state: 'success',
+        context: 'osade/human-approved',
+        description: `Approved by ${approvedBy.replace(/^github:/, '@')}`.slice(0, 140),
+      });
+    } catch (err) {
+      this.#onWarning(`could not set osade/human-approved on ${headSha.slice(0, 8)}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * §M.7.4 — marks a commit as having no human approval.
+   *
+   * `pending`, not `failure`: nobody did anything wrong by pushing. The commit simply has not
+   * been approved, and the status says exactly that rather than implying a fault.
+   */
+  async markUnapproved(
+    plan: { prOwner: string; prRepo: string },
+    headSha: string,
+  ): Promise<void> {
+    try {
+      await this.#scm.write('POST /repos/{owner}/{repo}/statuses/{sha}', {
+        owner: plan.prOwner,
+        repo: plan.prRepo,
+        sha: headSha,
+        state: 'pending',
+        context: 'osade/human-approved',
+        description: 'no human approval for this commit',
+      });
+    } catch (err) {
+      this.#onWarning(`could not set a pending status on ${headSha.slice(0, 8)}: ${(err as Error).message}`);
+    }
   }
 }
 

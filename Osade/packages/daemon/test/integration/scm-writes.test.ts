@@ -79,7 +79,7 @@ describe('§11.2 — no public write without an approved gate', () => {
     body: 'Closes #3.',
     head: 'osade/fix',
     base: 'main',
-    draft: false,
+    draft: false, head_sha: 'a1c0ffee',
   };
 
   it('refuses to open a PR on an undecided gate', async () => {

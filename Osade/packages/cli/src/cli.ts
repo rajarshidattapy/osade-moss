@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 
-import type { TaskStatus, TaskView } from '@osade/contract';
+import type { AuditRow, TaskStatus, TaskView } from '@osade/contract';
 
 import { api, OsadeCliError } from './client.js';
 import { looksLikePath, openRepo } from './open.js';
@@ -79,7 +79,7 @@ function currentTaskId(explicit?: string): string {
 }
 
 /** Command groups, so a bare word is never mistaken for a directory of the same name. */
-const GROUPS = ['task', 'index', 'migrate', 'policy', 'help'];
+const GROUPS = ['task', 'index', 'migrate', 'policy', 'team', 'catchup', 'attest', 'audit', 'help'];
 
 const HELP = `osade — run coding agents as open-source contributors
 
@@ -113,6 +113,12 @@ Usage:
   osade policy show <gate-id>              the clauses a gate's diff touches
   osade policy ack <gate-id> <clause-id>   acknowledge a requires_ack clause
 
+  osade team share                         print the join code (LAN mode only)
+  osade team list | invite | remove        who is in this session, and their role
+  osade catchup <chat-id> [question]       what happened while you were away
+  osade attest verify <body-file> <sha>    check a PR's attestation block
+  osade audit export --since <date>        the gate trail, as evidence
+
 Task id defaults to $OSADE_TASK_ID, which is set inside every agent lane.
 osade . opens the window and does not wait; task verbs need a running daemon.
 `;
@@ -132,6 +138,10 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   if (group === 'index') return indexCommand(command, rest, io);
   if (group === 'migrate') return migrateCommand(command, rest, io);
   if (group === 'policy') return policyCommand(command, rest, io);
+  if (group === 'team') return teamCommand(command, rest, io);
+  if (group === 'catchup') return catchUpCommand([command, ...rest].filter(isText), io);
+  if (group === 'attest') return attestCommand(command, rest, io);
+  if (group === 'audit') return auditCommand(command, rest, io);
 
   if (group !== 'task') {
     io.err(`unknown command: ${group}\n  try: osade help, or osade . to open this repository\n`);
@@ -552,4 +562,245 @@ async function policyCommand(
       io.err(`unknown policy command: ${command ?? '(none)'}\n  try: osade policy reload\n`);
       return 2;
   }
+}
+
+/**
+ * `osade team …` — OSADE-MOSS §M.6.
+ *
+ * The same surface a teammate uses in the window (§17). That symmetry is why the role matrix
+ * lives in the daemon rather than in either client: a rule enforced in one of them is not
+ * enforced.
+ */
+async function teamCommand(
+  command: string | undefined,
+  rest: string[],
+  io: Io,
+): Promise<number> {
+  switch (command) {
+    case 'share': {
+      const info = await api.shareInfo();
+      if (info.mode === 'loopback' || !info.joinCode) {
+        // M1: LAN mode needs auth and TLS. Saying so beats printing a code that cannot work.
+        io.out('this daemon is loopback-only — set server.listen to "lan" with TLS to share\n');
+        return 0;
+      }
+      io.out(`${info.joinCode}\n\n`);
+      io.out(`fingerprint  ${info.fingerprint ?? '-'}\n`);
+      io.out(`members      ${info.members.length}\n`);
+      return 0;
+    }
+
+    case 'list': {
+      const members = await api.memberList();
+      if (members.length === 0) {
+        io.out('no members yet — osade team invite <login> <role>\n');
+        return 0;
+      }
+      for (const member of members) {
+        io.out(`${pad(member.login, 24)}${pad(member.role, 12)}invited by ${member.invited_by}\n`);
+      }
+      return 0;
+    }
+
+    case 'invite': {
+      const [login, role] = rest;
+      if (!login || !role) {
+        io.err('usage: osade team invite <login> <maintainer|viewer>\n');
+        return 2;
+      }
+      await api.memberInvite(login, role);
+      io.out(`invited ${login} as ${role}\n`);
+      return 0;
+    }
+
+    case 'remove': {
+      const login = required(rest[0], 'osade team remove <login>', io);
+      if (!login) return 2;
+      await api.memberRemove(login);
+      // §M.10 — their live sessions went with them, in the same transaction.
+      io.out(`removed ${login}; their sessions are revoked\n`);
+      return 0;
+    }
+
+    case 'join': {
+      // Joining is an Electron-main concern: it stores the endpoint and session token in
+      // safeStorage (§M.6.4). A CLI has nowhere safe to keep a token, so it says so rather
+      // than inventing a plaintext file for one.
+      io.err('joining from the terminal is not supported — paste the code into the Osade window\n');
+      return 2;
+    }
+
+    default:
+      io.err(`unknown team command: ${command ?? '(none)'}\n  try: osade team list\n`);
+      return 2;
+  }
+}
+
+/**
+ * `osade catchup <chat-id> [question]` — §M.6.5.
+ *
+ * Marks the chat read, exactly as opening the window does. Guaranteed items are flagged with
+ * `!` so a reader can tell "everything important, plus what else happened" from "the twelve
+ * most relevant things" — a distinction that decides whether they are actually caught up.
+ */
+async function catchUpCommand(rest: string[], io: Io): Promise<number> {
+  const chatId = required(rest[0], 'osade catchup <chat-id> [question]', io);
+  if (!chatId) return 2;
+
+  const question = rest.slice(1).join(' ').trim();
+  if (question.length > 0) {
+    const hits = await api.askHistory(chatId, question);
+    if (hits.length === 0) {
+      io.out('nothing in this chat matches\n');
+      return 0;
+    }
+    // Cited hits, never a synthesised answer. The citation is the product.
+    for (const hit of hits) io.out(`[${hit.src_table}:${hit.src_id}] ${oneLine(hit.text)}\n`);
+    return 0;
+  }
+
+  const result = await api.catchUp(chatId);
+  if (result.items.length === 0) {
+    io.out('nothing new since you last looked\n');
+    return 0;
+  }
+  for (const item of result.items) {
+    io.out(`${item.guaranteed ? '!' : ' '} ${pad(item.kind, 18)}${oneLine(item.text)}\n`);
+  }
+  io.out(
+    `\n${result.items.length} item(s) via ${result.backend} in ${result.retrieval_ms.toFixed(1)} ms\n`,
+  );
+  return 0;
+}
+
+/** `osade attest verify` — §M.7.4. */
+async function attestCommand(
+  command: string | undefined,
+  rest: string[],
+  io: Io,
+): Promise<number> {
+  if (command !== 'verify') {
+    io.err(`unknown attest command: ${command ?? '(none)'}\n  try: osade attest verify <file> <sha>\n`);
+    return 2;
+  }
+  const [bodyFile, head, attestors] = rest;
+  if (!bodyFile || !head) {
+    io.err('usage: osade attest verify <pr-body-file> <current-head-sha> [attestors.json]\n');
+    return 2;
+  }
+
+  const { readFileSync } = await import('node:fs');
+  const result = await api.attestationVerify({
+    body: readFileSync(resolve(bodyFile), 'utf8'),
+    currentHead: head,
+    ...(attestors ? { attestorsJson: readFileSync(resolve(attestors), 'utf8') } : {}),
+  });
+
+  switch (result.state) {
+    case 'valid':
+      io.out(`valid — approved by ${result.approved_by} for ${head.slice(0, 8)}\n`);
+      return 0;
+    case 'stale':
+      // Stale is not invalid: a named human did approve an earlier commit. Exit 0, because
+      // nothing is wrong — there is simply newer code.
+      io.out(
+        `stale — approved by ${result.approved_by} for ${result.approved_head?.slice(0, 8)}, ` +
+          `but the head is now ${head.slice(0, 8)}\n`,
+      );
+      return 0;
+    case 'absent':
+      io.out('no attestation in this pull request\n');
+      return 1;
+    default:
+      io.err(`invalid — ${result.reason ?? 'the signature does not verify'}\n`);
+      return 1;
+  }
+}
+
+/** `osade audit export --since <date>` — §M.8.4. */
+async function auditCommand(
+  command: string | undefined,
+  rest: string[],
+  io: Io,
+): Promise<number> {
+  if (command !== 'export') {
+    io.err(
+      `unknown audit command: ${command ?? '(none)'}\n  try: osade audit export --since <date>\n`,
+    );
+    return 2;
+  }
+
+  const sinceIndex = rest.indexOf('--since');
+  const sinceArg = sinceIndex === -1 ? undefined : rest[sinceIndex + 1];
+  const since = sinceArg ? Date.parse(sinceArg) : Number.NaN;
+  if (!Number.isFinite(since)) {
+    io.err('usage: osade audit export --since <YYYY-MM-DD> [--repo <id>] [--format jsonl|csv]\n');
+    return 2;
+  }
+
+  const repoIndex = rest.indexOf('--repo');
+  const repoId = repoIndex === -1 ? undefined : rest[repoIndex + 1];
+  const formatIndex = rest.indexOf('--format');
+  const format = formatIndex === -1 ? 'jsonl' : rest[formatIndex + 1];
+
+  const rows = await api.auditExport({ since, ...(repoId ? { repoId } : {}) });
+  if (format === 'csv') {
+    io.out(csvOf(rows));
+    return 0;
+  }
+  // JSON Lines: one self-contained record per line, so a partial file is still readable.
+  for (const row of rows) io.out(`${JSON.stringify(row)}\n`);
+  return 0;
+}
+
+/**
+ * CSV for the spreadsheet an auditor will actually open.
+ *
+ * Rendered here rather than in the daemon so the procedure keeps returning typed rows — a
+ * procedure that returned a formatted string would put presentation behind the contract.
+ */
+function csvOf(rows: readonly AuditRow[]): string {
+  const header = [
+    'gate_id',
+    'gate',
+    'repo',
+    'decided_at',
+    'decision',
+    'decided_by',
+    'head_sha',
+    'verification',
+    'clauses_shown',
+    'clauses_acked',
+    'attestation_id',
+  ];
+  const cell = (value: string): string =>
+    /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+
+  const lines = rows.map((row) =>
+    [
+      row.gate_id,
+      row.gate,
+      row.repo,
+      row.decided_at ?? '',
+      row.decision ?? '',
+      row.decided_by ?? '',
+      row.head_sha ?? '',
+      row.verification.map((step) => `${step.step}=${step.exit ?? '?'}`).join(';'),
+      row.clauses_shown.map((clause) => clause.ref).join(';'),
+      row.clauses_acked.map((clause) => clause.ref).join(';'),
+      row.attestation_id ?? '',
+    ]
+      .map(cell)
+      .join(','),
+  );
+  return [header.join(','), ...lines].join('\n') + '\n';
+}
+
+function oneLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  return collapsed.length > 100 ? `${collapsed.slice(0, 99)}…` : collapsed;
+}
+
+function isText(value: string | undefined): value is string {
+  return typeof value === 'string' && value.length > 0;
 }

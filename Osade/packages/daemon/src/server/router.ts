@@ -6,8 +6,17 @@ import { z } from 'zod';
 import {
   ContextItem,
   ContextPack,
+  AttestationCheck,
+  AuditRow,
+  CatchUpItem,
+  CatchUpResult,
   ConventionImpact,
   ConventionView,
+  Member,
+  Role,
+  TriageRow,
+  SessionGrant,
+  ShareInfo,
   DiscoveryMiss,
   GateClauseView,
   MigrationChangeKind,
@@ -68,6 +77,13 @@ import type { Knowledge } from '../knowledge/service.js';
 import { readRepoRules, repoRulesPath, writeRepoRules } from '../knowledge/repo-rules.js';
 import { MigrationNotConfirmedError, type MigrationService } from '../domain/migration.js';
 import type { GateClauses } from '../domain/gate-clauses.js';
+import type { Attestations } from '../attest/service.js';
+import type { CatchUp } from './catch-up.js';
+import { parseAttestorFile } from '../attest/keys.js';
+import { auditExport } from '../domain/audit.js';
+import type { PrSignals } from '../scm/signals.js';
+import { atLeast, type Members, type Session } from './members.js';
+import { requiredRole } from './roles.js';
 import { reloadPolicies } from '../knowledge/policies.js';
 import type { RetrievalService } from '../retrieval/service.js';
 import type { ScmPoller } from '../scm/poller.js';
@@ -98,10 +114,97 @@ export interface DaemonContext {
   migrations?: MigrationService | null;
   /** §M.8 — F4. Absent only in a test harness that does not exercise gate clauses. */
   clauses?: GateClauses | null;
+  /** §M.7 — F3's attestations and their verification. */
+  attest?: Attestations | null;
+  /** §M.6 — F2. Absent on a loopback-only daemon with no members configured. */
+  members?: Members | null;
+  catchUp?: CatchUp | null;
+  /** The caller's session, resolved from the bearer token by the listener. */
+  session?: Session | null;
+  /** The raw token, so `authLogout` can revoke the one that was used. */
+  sessionToken?: string | null;
+  /** §M.6.1 — the join code, when this daemon is shareable. */
+  share?: (() => ShareInfo) | null;
+  /** §M.7.5 — F3's maintainer-facing triage signals. */
+  signals?: PrSignals | null;
   now: () => number;
 }
 
+/** §M.9.2 `server.sessionTtlHours`, as milliseconds. */
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+function requireMembers(ctx: DaemonContext): Members {
+  if (!ctx.members) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no member registry configured',
+    });
+  }
+  return ctx.members;
+}
+
+function requireSignals(ctx: DaemonContext): PrSignals {
+  if (!ctx.signals) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no PR signal service configured',
+    });
+  }
+  return ctx.signals;
+}
+
+function requireCatchUp(ctx: DaemonContext): CatchUp {
+  if (!ctx.catchUp) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'this daemon has no catch-up service configured',
+    });
+  }
+  return ctx.catchUp;
+}
+
 const t = initTRPC.context<DaemonContext>().create();
+
+/**
+ * §M.6.2, §M.6.6 — the role gate, in exactly one place.
+ *
+ * **Denies by omission.** A procedure with no entry in `ROLE_MATRIX` is refused, not allowed:
+ * the failure mode of an allow-by-default matrix is that someone adds a procedure, forgets the
+ * entry, and a viewer can now do it. `role-matrix.test.ts` turns that into a build failure, and
+ * this turns it into a refusal at runtime if the test is ever skipped.
+ *
+ * **Loopback with no members is the single-user case** and needs no session: the person at the
+ * keyboard owns the machine. The moment a member registry exists — which only happens when
+ * someone has been invited — every call needs a session and a role.
+ */
+const enforceRole = t.middleware(({ ctx, path, next }) => {
+  const required = requiredRole(path);
+  if (required === undefined) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: `${path} declares no role (OSADE-MOSS §M.6.2). Add it to ROLE_MATRIX.`,
+    });
+  }
+  if (required === null) return next();
+
+  // Single-user, loopback, nobody invited: the caller is the owner by construction.
+  if (!ctx.members || ctx.members.list().length === 0) return next();
+
+  const session = ctx.session;
+  if (!session) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'this session is not authenticated' });
+  }
+  if (!atLeast(session.role, required)) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: `${path} needs the ${required} role; ${session.login} is a ${session.role}`,
+    });
+  }
+  return next();
+});
+
+/** Every procedure goes through the role gate. There is no unguarded builder. */
+const procedure = t.procedure.use(enforceRole);
 
 function viewFor(ctx: DaemonContext, taskId: string): TaskView | null {
   return toTaskView(ctx.db, taskId, ctx.now());
@@ -147,14 +250,14 @@ const SORT_RANK: Record<TaskStatus, number> = {
 };
 
 export const appRouter = t.router({
-  health: t.procedure
+  health: procedure
     .output(z.object({ ok: z.literal(true), tasks: z.number().int() }))
     .query(({ ctx }) => ({
       ok: true as const,
       tasks: listTaskFacts(ctx.db).length,
     })),
 
-  taskList: t.procedure.output(z.array(TaskView)).query(({ ctx }) => {
+  taskList: procedure.output(z.array(TaskView)).query(({ ctx }) => {
     const views = listTaskFacts(ctx.db)
       .map((f) => viewFor(ctx, f.task.id))
       .filter((v): v is TaskView => v != null);
@@ -166,12 +269,12 @@ export const appRouter = t.router({
     });
   }),
 
-  taskGet: t.procedure
+  taskGet: procedure
     .input(z.object({ taskId: TaskId }))
     .output(TaskView.nullable())
     .query(({ ctx, input }) => viewFor(ctx, input.taskId)),
 
-  taskCreate: t.procedure
+  taskCreate: procedure
     .input(
       z.object({
         repoPath: z.string().min(1),
@@ -203,7 +306,7 @@ export const appRouter = t.router({
       }
     }),
 
-  orchestratorOpen: t.procedure
+  orchestratorOpen: procedure
     .input(z.object({ repoPath: z.string().min(1), agentId: z.string().optional() }))
     .output(z.object({ taskId: TaskId, chatId: z.string(), isolated: z.literal(false) }))
     .mutation(async ({ ctx, input }) => {
@@ -225,7 +328,7 @@ export const appRouter = t.router({
     }),
 
   /** Runs the §8.2 launch sequence. Long-running: worktree, lane, agent start. */
-  taskLaunch: t.procedure
+  taskLaunch: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ taskId: TaskId, paneId: z.string(), workspaceId: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -241,7 +344,7 @@ export const appRouter = t.router({
     }),
 
   /** Sends a prompt into the task's agent lane. */
-  taskSend: t.procedure
+  taskSend: procedure
     .input(z.object({ taskId: TaskId, text: z.string().min(1), wait: z.boolean().optional() }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(async ({ ctx, input }) => {
@@ -259,7 +362,7 @@ export const appRouter = t.router({
     }),
 
   /** Writes pasted photos under ~/.osade/inbox/<task>/ so the agent can open them. */
-  taskDropImages: t.procedure
+  taskDropImages: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -288,7 +391,7 @@ export const appRouter = t.router({
     }),
 
   /** Reads the agent pane transcript — §4.4.1. On demand, never a render loop. */
-  taskTranscript: t.procedure
+  taskTranscript: procedure
     .input(z.object({ taskId: TaskId, lines: z.number().int().min(1).max(1000).optional() }))
     .output(z.object({ text: z.string(), revision: z.number(), truncated: z.boolean() }))
     .query(async ({ ctx, input }) => {
@@ -298,7 +401,7 @@ export const appRouter = t.router({
     }),
 
   /** A cmd/PowerShell (or $SHELL) PTY in this lane's cwd. Not the agent pane. */
-  taskShellOpen: t.procedure
+  taskShellOpen: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -314,12 +417,12 @@ export const appRouter = t.router({
       return { cwd: ctx.shells.open(input.taskId, located.cwd, size) };
     }),
 
-  taskShellRead: t.procedure
+  taskShellRead: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ text: z.string() }))
     .query(({ ctx, input }) => ({ text: ctx.shells.read(input.taskId) })),
 
-  taskShellWrite: t.procedure
+  taskShellWrite: procedure
     .input(z.object({ taskId: TaskId, data: z.string().min(1) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -331,7 +434,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  taskShellResize: t.procedure
+  taskShellResize: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -345,7 +448,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  taskShellClose: t.procedure
+  taskShellClose: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -353,7 +456,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  taskFsList: t.procedure
+  taskFsList: procedure
     .input(z.object({ taskId: TaskId, dirs: z.array(z.string()).optional() }))
     .output(
       z.object({
@@ -389,7 +492,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskFsRead: t.procedure
+  taskFsRead: procedure
     .input(z.object({ taskId: TaskId, path: z.string().min(1) }))
     .output(
       z.object({
@@ -408,7 +511,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskFsWrite: t.procedure
+  taskFsWrite: procedure
     .input(z.object({ taskId: TaskId, path: z.string().min(1), text: z.string() }))
     .output(z.object({ path: z.string(), bytes: z.number().int() }))
     .mutation(({ ctx, input }) => {
@@ -420,7 +523,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskChangesList: t.procedure
+  taskChangesList: procedure
     .input(z.object({ taskId: TaskId }))
     .output(
       z.object({
@@ -457,7 +560,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskChangesDiff: t.procedure
+  taskChangesDiff: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -481,7 +584,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskArchive: t.procedure
+  taskArchive: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -490,7 +593,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  taskRetitle: t.procedure
+  taskRetitle: procedure
     .input(z.object({ taskId: TaskId, title: z.string().min(1) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -501,7 +604,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  taskBranchOut: t.procedure
+  taskBranchOut: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -532,7 +635,7 @@ export const appRouter = t.router({
       }
     }),
 
-  taskSwitchBranch: t.procedure
+  taskSwitchBranch: procedure
     .input(z.object({ taskId: TaskId, branch: z.string().min(1) }))
     .output(z.object({ gateId: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -557,7 +660,7 @@ export const appRouter = t.router({
       return { gateId };
     }),
 
-  repoStatus: t.procedure
+  repoStatus: procedure
     .input(z.object({ repoId: z.string().min(1) }))
     .output(
       z.object({
@@ -575,7 +678,7 @@ export const appRouter = t.router({
       return repoWorkingStatus(repo.path);
     }),
 
-  repoBranchList: t.procedure
+  repoBranchList: procedure
     .input(z.object({ repoId: z.string().min(1) }))
     .output(z.array(z.string()))
     .query(async ({ ctx, input }) => {
@@ -586,7 +689,7 @@ export const appRouter = t.router({
       return listLocalBranches(repo.path);
     }),
 
-  repoBranchHolders: t.procedure
+  repoBranchHolders: procedure
     .input(z.object({ repoId: z.string().min(1) }))
     .output(
       z.array(
@@ -632,7 +735,7 @@ export const appRouter = t.router({
         });
     }),
 
-  taskMoveBranch: t.procedure
+  taskMoveBranch: procedure
     .input(z.object({ taskId: TaskId, checkoutRef: z.string().min(1) }))
     .output(
       z.object({
@@ -662,7 +765,7 @@ export const appRouter = t.router({
    * rather than waiting for a first task is what lets the window open on a repo with nothing in
    * it yet and still know whose repo it is.
    */
-  repoOpen: t.procedure
+  repoOpen: procedure
     .input(z.object({ path: z.string().min(1) }))
     .output(
       z.object({
@@ -710,7 +813,7 @@ export const appRouter = t.router({
       };
     }),
 
-  repoRulesGet: t.procedure
+  repoRulesGet: procedure
     .input(z.object({ repoId: z.string().min(1) }))
     .output(z.object({ text: z.string(), path: z.string() }))
     .query(({ ctx, input }) => {
@@ -718,7 +821,7 @@ export const appRouter = t.router({
       return { text: readRepoRules(path), path: repoRulesPath(path) };
     }),
 
-  repoRulesSave: t.procedure
+  repoRulesSave: procedure
     .input(z.object({ repoId: z.string().min(1), text: z.string() }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -726,7 +829,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  repoSetDefaultAgent: t.procedure
+  repoSetDefaultAgent: procedure
     .input(z.object({ repoId: z.string().min(1), agentId: z.string().min(1) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -744,7 +847,7 @@ export const appRouter = t.router({
       return { ok: true as const };
     }),
 
-  agentCatalogList: t.procedure
+  agentCatalogList: procedure
     .output(
       z.array(
         z.object({
@@ -765,7 +868,7 @@ export const appRouter = t.router({
   // ── verification (§10) ───────────────────────────────────────────────────
 
   /** Derives a plan and stores it. §10.1 — shown to the user before first use. */
-  verifyPlanDerive: t.procedure
+  verifyPlanDerive: procedure
     .input(z.object({ taskId: TaskId }))
     .output(
       z.object({
@@ -821,7 +924,7 @@ export const appRouter = t.router({
     }),
 
   /** §10.1 — the user confirms (or edits) the plan. Only then may it run. */
-  verifyPlanConfirm: t.procedure
+  verifyPlanConfirm: procedure
     .input(z.object({ taskId: TaskId, steps: z.array(z.unknown()).optional() }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -846,7 +949,7 @@ export const appRouter = t.router({
    * deriving resets `needs_review` to 1 — silently discarding the confirmation §10.1 exists to
    * collect. Found by looking at the panel for the first time.
    */
-  verifyPlanGet: t.procedure
+  verifyPlanGet: procedure
     .input(z.object({ taskId: TaskId }))
     .output(
       z
@@ -881,7 +984,7 @@ export const appRouter = t.router({
       };
     }),
 
-  verifyRun: t.procedure
+  verifyRun: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ passed: z.boolean(), headSha: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -906,7 +1009,7 @@ export const appRouter = t.router({
       return { passed: report.passed, headSha: report.headSha };
     }),
 
-  verifyRunLog: t.procedure
+  verifyRunLog: procedure
     .input(z.object({ runId: z.string().min(1) }))
     .output(z.object({ text: z.string() }))
     .query(({ ctx, input }) => {
@@ -917,7 +1020,7 @@ export const appRouter = t.router({
       return { text: tailFile(row.log_path, 40) };
     }),
 
-  runHeadless: t.procedure
+  runHeadless: procedure
     .input(
       z.object({
         repoId: z.string().min(1),
@@ -946,7 +1049,7 @@ export const appRouter = t.router({
 
   // ── gates (§14) ──────────────────────────────────────────────────────────
 
-  gateDecide: t.procedure
+  gateDecide: procedure
     .input(z.object({ gateId: z.string(), decision: z.enum(['approve', 'deny']) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(async ({ ctx, input }) => {
@@ -962,7 +1065,7 @@ export const appRouter = t.router({
     }),
 
   /** §14.2 — editing rewrites the payload and re-hashes, so the edit is what is bound. */
-  gateEditAndApprove: t.procedure
+  gateEditAndApprove: procedure
     .input(z.object({ gateId: z.string(), payload: z.unknown() }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(async ({ ctx, input }) => {
@@ -978,7 +1081,7 @@ export const appRouter = t.router({
   // ── GitHub (§11) and triage (§12) ────────────────────────────────────────
 
   /** §11.1 — the issue list for a watched repo. Candidates, not tasks. */
-  issueList: t.procedure
+  issueList: procedure
     .input(z.object({ repoId: z.string() }))
     .output(
       z.array(
@@ -998,7 +1101,7 @@ export const appRouter = t.router({
    * `triage` makes it a task that terminates in an artifact rather than a PR. That path is the
    * wedge, so it is a first-class option here rather than a mode discovered later.
    */
-  issueImport: t.procedure
+  issueImport: procedure
     .input(
       z.object({
         repoPath: z.string().min(1),
@@ -1022,7 +1125,7 @@ export const appRouter = t.router({
     }),
 
   /** Forces a PR refresh without waiting out the 30s interval. */
-  scmRefresh: t.procedure
+  scmRefresh: procedure
     .input(z.object({ taskId: TaskId }))
     .output(z.object({ refreshed: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
@@ -1038,7 +1141,7 @@ export const appRouter = t.router({
    * Shown *before* asking for approval: §11.3 says check permissions before offering the
    * action, not after.
    */
-  prPlan: t.procedure
+  prPlan: procedure
     .input(z.object({ taskId: TaskId }))
     .output(
       z.object({
@@ -1072,7 +1175,7 @@ export const appRouter = t.router({
     }),
 
   /** §11.2 — requests a gate for opening a PR. Nothing is written until it is approved. */
-  prOpenRequest: t.procedure
+  prOpenRequest: procedure
     .input(
       z.object({
         taskId: TaskId,
@@ -1084,12 +1187,22 @@ export const appRouter = t.router({
     .output(z.object({ gateId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const plan = await ctx.scmWrites.planFork(input.taskId);
+      // A1 — the approval is for this commit. `assertExecutableNow` re-reads the branch before
+      // the PR opens and aborts if it moved.
+      const headSha = await ctx.scmWrites.headSha(input.taskId);
+      if (!headSha) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'this lane has no commit to open a pull request for',
+        });
+      }
       const payload = {
         title: input.title,
         body: input.body,
         head: plan.head,
         base: plan.prBase,
         draft: input.draft ?? false,
+        head_sha: headSha,
       };
       return { gateId: await ctx.scmWrites.requestGate(input.taskId, 'gate.pr_open', payload) };
     }),
@@ -1098,7 +1211,7 @@ export const appRouter = t.router({
    * §11.2 / §12 — requests a gate for posting a comment on the originating issue.
    * Nothing is written until it is approved.
    */
-  issueCommentRequest: t.procedure
+  issueCommentRequest: procedure
     .input(z.object({ taskId: TaskId, body: z.string().min(1) }))
     .output(z.object({ gateId: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -1118,7 +1231,7 @@ export const appRouter = t.router({
   // ── §13 repository conventions ─────────────────────────────────────────────
 
   /** What is known about this repo, and whether more can be learned right now. */
-  mineStatus: t.procedure
+  mineStatus: procedure
     .input(z.object({ repoId: z.string() }))
     .output(MineStatus)
     .query(({ ctx, input }) => {
@@ -1145,7 +1258,7 @@ export const appRouter = t.router({
    * shape — a client that times out would learn nothing about a run still spending money. Poll
    * `mineStatus` for progress.
    */
-  mineRepo: t.procedure
+  mineRepo: procedure
     .input(z.object({ repoId: z.string(), full: z.boolean().optional() }))
     .output(z.object({ runId: z.string() }))
     .mutation(({ ctx, input }) => {
@@ -1157,7 +1270,7 @@ export const appRouter = t.router({
     }),
 
   /** §13.6 — the measurable claim. Reports what it measured, including bad news. */
-  conventionImpact: t.procedure
+  conventionImpact: procedure
     .input(z.object({ repoId: z.string() }))
     .output(ConventionImpact)
     .query(async ({ ctx, input }) => {
@@ -1168,20 +1281,20 @@ export const appRouter = t.router({
       }
     }),
 
-  conventionList: t.procedure
+  conventionList: procedure
     .input(z.object({ repoId: z.string() }))
     .output(z.array(ConventionView))
     .query(({ ctx, input }) => requireKnowledge(ctx).list(input.repoId)),
 
   /** §13.4 — one-click confirmation. The renderer shows the evidence beside the toggle. */
-  conventionConfirm: t.procedure
+  conventionConfirm: procedure
     .input(z.object({ id: z.string() }))
     .output(z.object({ confirmed: z.boolean() }))
     .mutation(({ ctx, input }) => ({
       confirmed: requireKnowledge(ctx).confirm(input.id),
     })),
 
-  conventionReject: t.procedure
+  conventionReject: procedure
     .input(z.object({ id: z.string(), reason: z.string().min(1) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -1198,7 +1311,7 @@ export const appRouter = t.router({
    * normal state of an install with no Moss credentials, not an error, so the UI says what is
    * missing rather than that something is broken.
    */
-  retrievalStats: t.procedure
+  retrievalStats: procedure
     .output(RetrievalStats)
     .query(({ ctx }) => requireRetrieval(ctx).stats()),
 
@@ -1208,7 +1321,7 @@ export const appRouter = t.router({
    * Safe by construction (R1): the index is derived, so the worst a rebuild costs is the time
    * it takes. It is a mutation because it is expensive, not because it changes any fact.
    */
-  indexRebuild: t.procedure
+  indexRebuild: procedure
     .input(z.object({ ns: Namespace.optional() }))
     .output(z.object({ indexed: z.number().int() }))
     .mutation(async ({ ctx, input }) => ({
@@ -1223,7 +1336,7 @@ export const appRouter = t.router({
    * pack is a record of what was sent, and a link that goes nowhere is worse than one fewer
    * line.
    */
-  contextPackGet: t.procedure
+  contextPackGet: procedure
     .input(z.object({ id: z.string() }))
     .output(ContextPack.nullable())
     .query(({ ctx, input }) => readContextPack(ctx.db, input.id)),
@@ -1231,7 +1344,7 @@ export const appRouter = t.router({
   // ── §M.5 F1 self-maintaining APIs ──────────────────────────────────────────
 
   /** §M.5.3 — records the changelog. Extraction is a separate, explicit step. */
-  migrationCreate: t.procedure
+  migrationCreate: procedure
     .input(
       z.object({
         provider: z.string().min(1),
@@ -1254,7 +1367,7 @@ export const appRouter = t.router({
    * kept none is a model inventing changelog lines, and that has to be visible rather than
    * looking like a changelog with nothing in it.
    */
-  migrationExtract: t.procedure
+  migrationExtract: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(z.object({ kept: z.number().int(), dropped: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
@@ -1266,7 +1379,7 @@ export const appRouter = t.router({
     }),
 
   /** §M.5.3 — hand entry, for what the model missed. */
-  migrationAddChange: t.procedure
+  migrationAddChange: procedure
     .input(
       z.object({
         migrationId: z.string(),
@@ -1289,7 +1402,7 @@ export const appRouter = t.router({
     })),
 
   /** §M.5.3 — the gate between inference and action. Nothing downstream runs before this. */
-  migrationChangesConfirm: t.procedure
+  migrationChangesConfirm: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(({ ctx, input }) => {
@@ -1302,7 +1415,7 @@ export const appRouter = t.router({
     }),
 
   /** §M.5.7 — assigns strata, arms and waves. Fixed at assignment. */
-  migrationTargetsSet: t.procedure
+  migrationTargetsSet: procedure
     .input(z.object({ migrationId: z.string(), repoIds: z.array(z.string()).min(1) }))
     .output(z.object({ ok: z.literal(true) }))
     .mutation(async ({ ctx, input }) => {
@@ -1311,7 +1424,7 @@ export const appRouter = t.router({
     }),
 
   /** §M.5.4 — parse, enrich and write the chunks. They reach Moss through the indexer. */
-  migrationChunk: t.procedure
+  migrationChunk: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(z.object({ chunks: z.number().int(), unparsed: z.array(z.string()) }))
     .mutation(({ ctx, input }) =>
@@ -1319,7 +1432,7 @@ export const appRouter = t.router({
     ),
 
   /** §M.5.5 — retrieval and grep, both recorded. */
-  migrationDiscover: t.procedure
+  migrationDiscover: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(z.object({ sites: z.number().int(), queryMs: z.number() }))
     .mutation(({ ctx, input }) =>
@@ -1327,36 +1440,234 @@ export const appRouter = t.router({
     ),
 
   /** §M.5.6 — one wave, through the ordinary launch path. */
-  migrationLaunchWave: t.procedure
+  migrationLaunchWave: procedure
     .input(z.object({ migrationId: z.string(), wave: z.number().int().min(0) }))
     .output(z.object({ launched: z.array(TaskId), deferred: z.array(z.string()) }))
     .mutation(({ ctx, input }) =>
       guardMigration(() => requireMigrations(ctx).launchWave(input.migrationId, input.wave)),
     ),
 
-  migrationView: t.procedure
+  migrationView: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(MigrationView.nullable())
     .query(({ ctx, input }) => requireMigrations(ctx).view(input.migrationId)),
 
   /** §M.5.7 — the A/B readout. Every number derived, `n` shown beside it. */
-  migrationMetrics: t.procedure
+  migrationMetrics: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(MigrationMetrics)
     .query(({ ctx, input }) => requireMigrations(ctx).metrics(input.migrationId)),
 
   /** §M.5.8 — sites verification found that discovery did not. */
-  migrationMisses: t.procedure
+  migrationMisses: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(z.array(DiscoveryMiss))
     .query(({ ctx, input }) => requireMigrations(ctx).misses(input.migrationId)),
 
-  migrationMissesExport: t.procedure
+  migrationMissesExport: procedure
     .input(z.object({ migrationId: z.string(), dir: z.string().min(1) }))
     .output(z.object({ written: z.array(z.string()) }))
     .mutation(async ({ ctx, input }) => ({
       written: await requireMigrations(ctx).exportMisses(input.migrationId, input.dir),
     })),
+
+  // ── §M.6 F2 multiplayer lanes ──────────────────────────────────────────────
+
+  /**
+   * §M.6.2 — exchanges a teammate's GitHub token for an Osade session token.
+   *
+   * The only unauthenticated mutation in the router, and it has to be: it is the door. The
+   * teammate's GitHub token is used once to answer "who are you" and is never stored — every
+   * GitHub *write* still uses the host's token, behind a gate.
+   */
+  authExchange: procedure
+    .input(z.object({ githubToken: z.string().min(1) }))
+    .output(SessionGrant)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const granted = await requireMembers(ctx).exchange(input.githubToken);
+        return { ...granted, expires_at: ctx.now() + SESSION_TTL_MS };
+      } catch (err) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: (err as Error).message });
+      }
+    }),
+
+  authLogout: procedure.output(z.object({ ok: z.literal(true) })).mutation(({ ctx }) => {
+    if (ctx.sessionToken) requireMembers(ctx).logout(ctx.sessionToken);
+    return { ok: true as const };
+  }),
+
+  memberList: procedure.output(z.array(Member)).query(({ ctx }) => requireMembers(ctx).list()),
+
+  memberInvite: procedure
+    .input(z.object({ login: z.string().min(1), role: Role }))
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(({ ctx, input }) => {
+      requireMembers(ctx).invite(input.login, input.role, ctx.session?.login ?? 'owner');
+      return { ok: true as const };
+    }),
+
+  memberSetRole: procedure
+    .input(z.object({ login: z.string().min(1), role: Role }))
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(({ ctx, input }) => {
+      requireMembers(ctx).setRole(input.login, input.role);
+      return { ok: true as const };
+    }),
+
+  /** §M.10 — removing a teammate revokes their live sessions in the same transaction. */
+  memberRemove: procedure
+    .input(z.object({ login: z.string().min(1) }))
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(({ ctx, input }) => {
+      requireMembers(ctx).remove(input.login);
+      return { ok: true as const };
+    }),
+
+  /** §M.6.7 — presence is a heartbeat, so "is Priya here?" is derived, never a stored flag. */
+  presenceBeat: procedure
+    .input(z.object({ taskId: TaskId }))
+    .output(z.object({ present: z.array(z.string()) }))
+    .mutation(({ ctx, input }) => {
+      const members = requireMembers(ctx);
+      const login = ctx.session?.login;
+      if (login) members.beat(login, input.taskId);
+      return { present: members.presence(input.taskId) };
+    }),
+
+  /** §M.6.7 — advisory. It records who is driving; it does not lock the lane. */
+  taskClaim: procedure
+    .input(z.object({ taskId: TaskId }))
+    .output(z.object({ claimedBy: z.string().nullable() }))
+    .mutation(({ ctx, input }) => {
+      const members = requireMembers(ctx);
+      const login = ctx.session?.login ?? 'owner';
+      members.beat(login, input.taskId);
+      members.claim(input.taskId, login);
+      return { claimedBy: members.claimedBy(input.taskId) };
+    }),
+
+  taskRelease: procedure
+    .input(z.object({ taskId: TaskId }))
+    .output(z.object({ claimedBy: z.string().nullable() }))
+    .mutation(({ ctx, input }) => {
+      const members = requireMembers(ctx);
+      members.release(input.taskId, ctx.session?.login ?? 'owner');
+      return { claimedBy: members.claimedBy(input.taskId) };
+    }),
+
+  /**
+   * §M.6.5 — what happened while you were away.
+   *
+   * Gate decisions and verify failures are included by exact filter, never left to ranking: a
+   * catch-up that dropped "Priya rejected the PR" because it scored eleventh would be worse
+   * than none, because the reader would believe they had seen everything.
+   */
+  catchUp: procedure
+    .input(z.object({ chatId: z.string().min(1) }))
+    .output(CatchUpResult)
+    .query(({ ctx, input }) =>
+      requireCatchUp(ctx).since(ctx.session?.login ?? 'owner', input.chatId),
+    ),
+
+  /** §M.6.5 — cited hits, not a synthesised answer. The citation is the product. */
+  askHistory: procedure
+    .input(z.object({ chatId: z.string().min(1), question: z.string().min(1) }))
+    .output(z.array(CatchUpItem))
+    .query(({ ctx, input }) => requireCatchUp(ctx).ask(input.chatId, input.question)),
+
+  /** §M.6.1 — the join code, or null on loopback where there is nothing to join. */
+  shareInfo: procedure.output(ShareInfo).query(({ ctx }) => ctx.share?.() ?? {
+    mode: 'loopback' as const,
+    joinCode: null,
+    fingerprint: null,
+    members: ctx.members?.list() ?? [],
+  }),
+
+  // ── §M.7.4, §M.7.5, §M.8.4 — F3's maintainer half and the audit trail ──────
+
+  /** §M.7.2 — the attestation this lane last issued, if any. */
+  attestationGet: procedure
+    .input(z.object({ taskId: TaskId }))
+    .output(
+      z
+        .object({ head_sha: z.string(), approved_by: z.string(), approved_at: z.string(), tier: z.number().int() })
+        .nullable(),
+    )
+    .query(({ ctx, input }) => {
+      const latest = ctx.attest?.latestFor(input.taskId) ?? null;
+      if (!latest) return null;
+      return {
+        head_sha: latest.head_sha,
+        approved_by: latest.statement.approved_by,
+        approved_at: latest.statement.approved_at,
+        tier: latest.statement.tier,
+      };
+    }),
+
+  /**
+   * §M.7.4 — checks a PR body's block against the keys published in the repo.
+   *
+   * **Stale is not invalid.** A commit landing after approval means a named human really did
+   * approve an earlier one; conflating that with a forged signature would teach maintainers to
+   * ignore both.
+   */
+  attestationVerify: procedure
+    .input(
+      z.object({
+        body: z.string(),
+        currentHead: z.string().min(1),
+        attestorsJson: z.string().optional(),
+      }),
+    )
+    .output(AttestationCheck)
+    .query(({ ctx, input }) => {
+      const attest = ctx.attest;
+      if (!attest) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'attestation is not configured' });
+      }
+      const published = input.attestorsJson
+        ? (parseAttestorFile(input.attestorsJson)?.attestors ?? [])
+        : [{ key_id: attest.key().keyId, public_key: attest.key().publicPem }];
+
+      const result = attest.verifyBody(input.body, input.currentHead, published);
+      return {
+        state: result.state,
+        reason: result.state === 'invalid' ? result.reason : null,
+        approved_by: 'statement' in result ? result.statement.approved_by : null,
+        approved_head: 'statement' in result ? result.statement.head_sha : null,
+        current_head: input.currentHead,
+      };
+    }),
+
+  /** §M.7.5 — the triage list: attested, then unique, then duplicate clusters. */
+  prSignals: procedure
+    .input(z.object({ repoId: z.string() }))
+    .output(z.array(TriageRow))
+    .query(({ ctx, input }) => requireSignals(ctx).triage(input.repoId)),
+
+  /**
+   * §M.8.4 — a read-only projection over the gates in a window.
+   *
+   * Nothing in it is computed by a model. Running it twice over the same window produces the
+   * same bytes, which is what makes it something you can attach to a ticket.
+   */
+  auditExport: procedure
+    .input(
+      z.object({
+        since: z.number().int(),
+        until: z.number().int().optional(),
+        repoId: z.string().optional(),
+      }),
+    )
+    .output(z.array(AuditRow))
+    .query(({ ctx, input }) =>
+      auditExport(ctx.db, {
+        since: input.since,
+        ...(input.until != null ? { until: input.until } : {}),
+        ...(input.repoId ? { repoId: input.repoId } : {}),
+      }),
+    ),
 
   // ── §M.8 F4 compliance on the gate ─────────────────────────────────────────
 
@@ -1367,12 +1678,12 @@ export const appRouter = t.router({
    * and a filesystem watcher firing on a half-saved file would void approvals for no reason
    * anyone could see.
    */
-  policyReload: t.procedure
+  policyReload: procedure
     .output(PolicyReloadResult)
     .mutation(({ ctx }) => reloadPolicies(ctx.db, { onWarning: () => {} })),
 
   /** §M.8.3 — what the gate card shows, and whether approve is available yet. */
-  gateClauses: t.procedure
+  gateClauses: procedure
     .input(z.object({ gateId: z.string() }))
     .output(GateClauseView)
     .query(({ ctx, input }) => readGateClauses(ctx, input.gateId)),
@@ -1383,7 +1694,7 @@ export const appRouter = t.router({
    * The ack records who and when. It is not an approval and does not decide the gate; it only
    * removes one obstacle a human policy author deliberately put in front of the button.
    */
-  gateClauseAck: t.procedure
+  gateClauseAck: procedure
     .input(z.object({ gateId: z.string(), clauseId: z.string() }))
     .output(GateClauseView)
     .mutation(({ ctx, input }) => {
@@ -1392,7 +1703,7 @@ export const appRouter = t.router({
     }),
 
   /** The chip on a lane: the most recent pack for a task, or null before its first turn. */
-  contextPackLatest: t.procedure
+  contextPackLatest: procedure
     .input(z.object({ taskId: TaskId }))
     .output(ContextPack.nullable())
     .query(({ ctx, input }) => {

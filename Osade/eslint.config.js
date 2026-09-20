@@ -105,6 +105,35 @@ const NO_RETRIEVAL_WRITE_OUTSIDE_INDEXER = [
   },
 ];
 
+/**
+ * OSADE-MOSS §M.7.2 — signing lives in exactly one place.
+ *
+ * A signature is a claim about *identity*. A claim about identity that can be produced from
+ * anywhere in the codebase is not a claim — it is a formality that the next person to need one
+ * will reimplement slightly differently. `attest/**` owns the key and the primitives; everyone
+ * else asks it for an attestation.
+ *
+ * Hashing is untouched: `createHash` is used for payload hashes, pattern hashes and content
+ * addressing all over the daemon, and none of those assert who did anything.
+ */
+const NO_SIGNING_OUTSIDE_ATTEST = [
+  {
+    selector: 'CallExpression[callee.name=/^(sign|verify)$/]',
+    message:
+      'OSADE-MOSS §M.7.2: signing primitives live in packages/daemon/src/attest/**. Ask Attestations for one.',
+  },
+  {
+    selector: 'CallExpression[callee.name="generateKeyPairSync"]',
+    message:
+      'OSADE-MOSS §M.7.2: key material is created in packages/daemon/src/attest/** and nowhere else.',
+  },
+  {
+    selector: 'ImportSpecifier[imported.name=/^(generateKeyPairSync|createPrivateKey|createSign)$/]',
+    message:
+      'OSADE-MOSS §M.7.2: key material is handled in packages/daemon/src/attest/** and nowhere else.',
+  },
+];
+
 const BASE_SELECTORS = [NO_ENV_DESTRUCTURE, NO_PROCESS_BINDING_IMPORT, NO_RAW_ORCHESTRATOR_ID];
 
 export default tseslint.config(
@@ -146,7 +175,16 @@ export default tseslint.config(
         ...BASE_SELECTORS,
         NO_DIRECT_WS_EMIT,
         ...NO_RETRIEVAL_WRITE_OUTSIDE_INDEXER,
+        ...NO_SIGNING_OUTSIDE_ATTEST,
       ],
+    },
+  },
+
+  // ── one place that signs (OSADE-MOSS §M.7.2) ──────────────────────────────
+  {
+    files: ['packages/daemon/src/attest/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...BASE_SELECTORS, NO_DIRECT_WS_EMIT],
     },
   },
 

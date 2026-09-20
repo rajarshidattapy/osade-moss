@@ -13,6 +13,13 @@ import { pruneChangeLog } from '../db/index.js';
 import type { Gates } from '../domain/gates.js';
 import type { LaunchTask } from '../domain/launch-task.js';
 import type { Knowledge } from '../knowledge/service.js';
+import type { IncomingMessage } from 'node:http';
+
+import type { Attestations } from '../attest/service.js';
+import type { CatchUp } from './catch-up.js';
+import { loadTls, resolveBindAddress, type ListenMode } from './listen.js';
+import type { Members } from './members.js';
+import type { PrSignals } from '../scm/signals.js';
 import type { GateClauses } from '../domain/gate-clauses.js';
 import type { MigrationService } from '../domain/migration.js';
 import type { RetrievalService } from '../retrieval/service.js';
@@ -29,15 +36,18 @@ import { appRouter, type DaemonContext } from './router.js';
 /**
  * The daemon's HTTP + websocket surface.
  *
- * OSADE.md §2.1 — INVARIANT: binds `127.0.0.1` only. No `0.0.0.0` listener in v1, and there is
- * no remote mode. The port is written to `~/.osade/daemon.port` so the CLI and the Electron
- * app can find it without a fixed port collision.
+ * OSADE.md §2.1 bound `127.0.0.1` only. **OSADE-MOSS §M.6.1 replaces that**, and replaces it
+ * with a stronger guarantee rather than a looser one — INVARIANT M1: a non-loopback bind
+ * requires member auth *and* TLS, asserted in `listen.ts` before anything binds, fatally. The
+ * default is still loopback; `server.listen: "lan"` is a deliberate act.
+ *
+ * The port is written to `~/.osade/daemon.port` so the CLI and the Electron app can find it
+ * without a fixed port collision.
  *
  * §5.4 — the websocket carries only what `CdcBroadcaster` produces. This module wires the
  * socket; it never composes a message itself.
  */
 
-const LOOPBACK = '127.0.0.1';
 const CHANGE_LOG_PRUNE_INTERVAL_MS = 5 * 60_000;
 
 export interface DaemonServerOptions {
@@ -56,7 +66,16 @@ export interface DaemonServerOptions {
   migrations?: MigrationService | null;
   /** §M.8 — F4's clause matching and acks. */
   clauses?: GateClauses | null;
+  /** §M.7 — F3's attestations. */
+  attest?: Attestations | null;
   headless?: HeadlessRuns | null;
+  /** §M.6 — F2. Absent on a single-user daemon that has never invited anyone. */
+  members?: Members | null;
+  catchUp?: CatchUp | null;
+  /** §M.7.5 — F3's triage signals. */
+  signals?: PrSignals | null;
+  /** §M.6.1 — 'loopback' (default) or 'lan'. M1 is asserted before anything binds. */
+  listenMode?: ListenMode;
   /** 0 asks the OS for a free port, which is the default and what the port file is for. */
   port?: number;
   now?: () => number;
@@ -91,12 +110,41 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
     retrieval: options.retrieval ?? null,
     migrations: options.migrations ?? null,
     clauses: options.clauses ?? null,
+    attest: options.attest ?? null,
     headless: options.headless ?? null,
+    members: options.members ?? null,
+    catchUp: options.catchUp ?? null,
+    signals: options.signals ?? null,
     now,
   };
+
+  // §M.6.1 — M1 is asserted *before* anything binds. A misconfigured LAN mode is a fatal boot,
+  // not a warning: the thing being prevented is a laptop on conference wifi serving an
+  // unauthenticated API that can start processes on the host.
+  const tls = options.listenMode === 'lan' ? loadTls() : null;
+  const bindAddress = resolveBindAddress({
+    mode: options.listenMode ?? 'loopback',
+    port: options.port ?? 0,
+    auth: (options.members?.list().length ?? 0) > 0,
+    tls: tls != null,
+  });
+
+  /**
+   * §M.6.2 — the session comes from the bearer token, never from the request body.
+   *
+   * That is the whole of §M.6.3: `decided_by` is only worth anything if the identity behind it
+   * was established by the server. A client that could name itself could approve as anyone.
+   */
+  const contextFor = (req: IncomingMessage): DaemonContext => {
+    const header = req.headers.authorization;
+    const token = header?.startsWith('Bearer ') === true ? header.slice(7) : null;
+    const session = options.members?.resolve(token) ?? null;
+    return { ...context, session, sessionToken: token };
+  };
+
   const trpcHandler = createHTTPHandler({
     router: appRouter,
-    createContext: () => context,
+    createContext: ({ req }) => contextFor(req as IncomingMessage),
   });
 
   const http: Server = createServer((req, res) => {
@@ -119,7 +167,18 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
 
   const wss = new WebSocketServer({ server: http, path: '/ws' });
 
-  wss.on('connection', (socket: WebSocket) => {
+  wss.on('connection', (socket: WebSocket, req: IncomingMessage) => {
+    // §M.6.2 — an unauthenticated websocket is closed *before* the snapshot is sent. The
+    // snapshot is the whole ledger; sending it and then checking would be a disclosure with a
+    // polite error attached.
+    if (options.members && options.members.list().length > 0) {
+      const token = new URL(req.url ?? '/', 'http://x').searchParams.get('token');
+      if (!options.members.resolve(token)) {
+        socket.close(4401, 'auth_expired');
+        return;
+      }
+    }
+
     const send = (message: ServerMessage) => {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
     };
@@ -141,7 +200,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
     socket.on('error', () => unsubscribe());
   });
 
-  const port = await listen(http, options.port ?? 0);
+  const port = await listen(http, options.port ?? 0, bindAddress);
 
   const paths = osadePaths();
   mkdirSync(dirname(paths.portFile), { recursive: true });
@@ -177,10 +236,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
   };
 }
 
-function listen(server: Server, port: number): Promise<number> {
+function listen(server: Server, port: number, address: string): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, LOOPBACK, () => {
+    server.listen(port, address, () => {
       const address = server.address();
       if (address == null || typeof address === 'string') {
         reject(new Error('daemon did not bind a TCP port'));

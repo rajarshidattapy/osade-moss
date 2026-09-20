@@ -12,4 +12,5 @@ export * from './conventions.js';
 export * from './retrieval.js';
 export * from './migration.js';
 export * from './compliance.js';
+export * from './multiplayer.js';
 export * from './orchestrator-id.js';

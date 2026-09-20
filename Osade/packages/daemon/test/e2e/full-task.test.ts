@@ -134,8 +134,9 @@ describe.skipIf(!E2E)('M0 acceptance — one task end to end', () => {
   it('launches: prune → worktree → mirror → lane with env → subscribe → agent.start', async () => {
     const result = await launcher.launch(taskId);
 
-    expect(result.workspaceId).toMatch(/^w\d+$/);
-    expect(result.paneId).toMatch(/^w\d+:p\d+$/);
+    // Base-32, not decimal: the tenth workspace is `wA` (backend/src/workspace.rs:105).
+    expect(result.workspaceId).toMatch(/^w[0-9A-HJKMNP-TV-Z]+$/);
+    expect(result.paneId).toMatch(/^w[0-9A-HJKMNP-TV-Z]+:p[0-9A-HJKMNP-TV-Z]+$/);
     expect(result.worktreePath).toBeTruthy();
     expect(existsSync(result.worktreePath!)).toBe(true);
 

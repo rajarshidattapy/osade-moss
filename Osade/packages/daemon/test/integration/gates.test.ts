@@ -79,7 +79,7 @@ describe('§14.1 — the gate list', () => {
     const id = gates({ 'gate.force_push': 'yolo' }).request({
       taskId: 't1',
       gate: 'gate.force_push',
-      payload: { ref: 'main' },
+      payload: { ref: 'main', head_sha: 'a1c0ffee' },
     });
     const row = db.prepare('SELECT decided_at FROM gate_request WHERE id = ?').get(id) as {
       decided_at: number | null;
@@ -163,7 +163,7 @@ describe('§11.2 — payload hashing binds an approval to exact bytes', () => {
 describe('§14.2 — expiry', () => {
   it('an undecided gate expires after 24h, and expiry is not a denial', () => {
     const g = gates();
-    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: {} });
+    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: { head_sha: 'a1c0ffee' } });
 
     clock = NOW + GATE_TTL_MS + 1;
     expect(g.expireStale()).toBe(1);
@@ -177,19 +177,19 @@ describe('§14.2 — expiry', () => {
     expect(row.decided_by).toBe('policy:ttl');
   });
 
-  it('an approval that sat too long will not execute', () => {
+  it('an approval that sat too long will not execute', async () => {
     const g = gates();
-    const payload = { ref: 'main' };
+    const payload = { ref: 'main', head_sha: 'a1c0ffee' };
     const id = g.request({ taskId: 't1', gate: 'gate.push', payload });
     g.decide(id, 'approve');
 
     clock = NOW + GATE_TTL_MS + 1;
-    expect(() => g.assertExecutable(id, payload)).toThrow(/expired/);
+    await expect(g.assertExecutableNow(id, payload)).rejects.toThrow(/expired/);
   });
 
   it('a decided gate is left alone by expiry', () => {
     const g = gates();
-    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: {} });
+    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: { head_sha: 'a1c0ffee' } });
     g.decide(id, 'approve');
     clock = NOW + GATE_TTL_MS + 1;
     expect(g.expireStale()).toBe(0);
@@ -203,7 +203,7 @@ describe('§14.2 — expiry', () => {
 describe('§6 row 3 — an open gate reaches the ledger', () => {
   it('an undecided gate is visible as an open gate; a decided one is not', () => {
     const g = gates();
-    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: {} });
+    const id = g.request({ taskId: 't1', gate: 'gate.push', payload: { head_sha: 'a1c0ffee' } });
 
     const open = () =>
       (
@@ -233,7 +233,7 @@ describe('§9.1 — undo_turn is conditional', () => {
 
 describe('attached-mode gate policy', () => {
   it('gate.commit auto-decides on an isolated lane', () => {
-    const id = gates().request({ taskId: 't1', gate: 'gate.commit', payload: { m: 'x' } });
+    const id = gates().request({ taskId: 't1', gate: 'gate.commit', payload: { m: 'x', head_sha: 'a1c0ffee' } });
     const row = db.prepare('SELECT decision FROM gate_request WHERE id = ?').get(id) as {
       decision: string | null;
     };
@@ -242,7 +242,7 @@ describe('attached-mode gate policy', () => {
 
   it('gate.commit is human on an attached lane', () => {
     db.prepare("UPDATE task SET worktree_path = NULL WHERE id = 't1'").run();
-    const id = gates().request({ taskId: 't1', gate: 'gate.commit', payload: { m: 'x' } });
+    const id = gates().request({ taskId: 't1', gate: 'gate.commit', payload: { m: 'x', head_sha: 'a1c0ffee' } });
     const row = db.prepare('SELECT decided_at, decision FROM gate_request WHERE id = ?').get(id) as {
       decided_at: number | null;
       decision: string | null;

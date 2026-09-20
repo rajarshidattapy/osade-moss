@@ -201,7 +201,7 @@ describe('§M.8.2 — clauses are found at request time and bound into the paylo
     await retrieval.indexer.drain();
 
     const set = await clauses.forDiff('r1', SECRET_DIFF);
-    const payload = { title: 'Add config', body: 'x' };
+    const payload = { title: 'Add config', body: 'x', head_sha: 'a1c0ffee' };
     const gateId = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
     clauses.record(gateId, set);
     return { gateId, payload };
@@ -233,7 +233,7 @@ describe('§M.8.2 — clauses are found at request time and bound into the paylo
     const set = await clauses.forDiff('r1', SECRET_DIFF);
     expect(set.matches).toEqual([]);
 
-    const payload = { title: 'Add config', body: 'x' };
+    const payload = { title: 'Add config', body: 'x', head_sha: 'a1c0ffee' };
     // No clauses at all → no `clauses_hash` key, so approvals in flight at upgrade time keep
     // working. Passing the empty set must not change the payload shape.
     const withEmpty = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
@@ -286,7 +286,7 @@ describe('§M.8.5 criterion 1 — approve is refused until the clause is acknowl
     const gateId = gates.request({
       taskId: 't1',
       gate: 'gate.pr_open',
-      payload: { title: 'Add config' },
+      payload: { title: 'Add config', head_sha: 'a1c0ffee' },
       clauses: set,
     });
     clauses.record(gateId, set);
@@ -325,7 +325,7 @@ describe('§M.8.5 criterion 1 — approve is refused until the clause is acknowl
     const gateId = gates.request({
       taskId: 't1',
       gate: 'gate.pr_open',
-      payload: { title: 'x' },
+      payload: { title: 'x', head_sha: 'a1c0ffee' },
       clauses: set,
     });
     clauses.record(gateId, set);
@@ -350,7 +350,7 @@ describe('§M.8.5 criterion 2 — editing the policy voids the approval', () => 
     await retrieval.indexer.drain();
 
     const set = await clauses.forDiff('r1', SECRET_DIFF);
-    const payload = { title: 'Add config' };
+    const payload = { title: 'Add config', head_sha: 'a1c0ffee' };
     const gateId = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
     clauses.record(gateId, set);
     expect(set.matches.length).toBeGreaterThan(0);
@@ -365,7 +365,9 @@ describe('§M.8.5 criterion 2 — editing the policy voids the approval', () => 
     writePolicy(SECURITY_POLICY.replace('No credential,', 'No credential or secret,'));
     reloadPolicies(db, {});
 
-    expect(() => gates.assertExecutable(gateId, payload)).toThrow(/payload changed after approval/);
+    await expect(gates.assertExecutableNow(gateId, payload)).rejects.toThrow(
+      /payload changed after approval/,
+    );
   });
 
   it('an untouched policy still executes cleanly', async () => {
@@ -374,7 +376,7 @@ describe('§M.8.5 criterion 2 — editing the policy voids the approval', () => 
     await retrieval.indexer.drain();
 
     const set = await clauses.forDiff('r1', SECRET_DIFF);
-    const payload = { title: 'Add config' };
+    const payload = { title: 'Add config', head_sha: 'a1c0ffee' };
     const gateId = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
     clauses.record(gateId, set);
 
@@ -385,6 +387,6 @@ describe('§M.8.5 criterion 2 — editing the policy voids the approval', () => 
     gates.decide(gateId, 'approve');
 
     reloadPolicies(db, {});
-    expect(() => gates.assertExecutable(gateId, payload)).not.toThrow();
+    await expect(gates.assertExecutableNow(gateId, payload)).resolves.toBeUndefined();
   });
 });

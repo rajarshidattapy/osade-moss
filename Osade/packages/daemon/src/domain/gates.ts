@@ -87,6 +87,21 @@ export const GATES: readonly GatePolicy[] = [
 
 const GATE_INDEX = new Map(GATES.map((g) => [g.gate, g]));
 
+/**
+ * OSADE-MOSS §M.7.1 — the gates whose approval is about a *diff*.
+ *
+ * Lives here rather than beside the clause finder because **INVARIANT A1** is enforced in this
+ * module: every gate in this set must pin the commit it approves. F4's clause matching happens
+ * to need the same list, which is a coincidence of scope rather than a shared concern.
+ */
+export const DIFF_BEARING: ReadonlySet<GateName> = new Set<GateName>([
+  'gate.commit',
+  'gate.push',
+  'gate.pr_open',
+  'gate.pr_update',
+  'gate.force_push',
+]);
+
 /** §14.2 — gates expire after 24h into `decision='expired'`. */
 export const GATE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -142,17 +157,24 @@ export interface GatesOptions {
   now?: () => number;
   /** Policy downgrades, e.g. `{ 'gate.commit': 'auto-commit' }`. Recorded in `decided_by`. */
   policies?: Partial<Record<GateName, string>>;
+  /**
+   * A1 — reads a task's branch head. Injected so this module never shells out to git itself,
+   * and so a test can drive the "branch moved" case without a repository.
+   */
+  resolveHead?: (taskId: string) => Promise<string | null>;
 }
 
 export class Gates {
   readonly #db: Db;
   readonly #now: () => number;
   readonly #policies: Partial<Record<GateName, string>>;
+  readonly #resolveHead: ((taskId: string) => Promise<string | null>) | null;
 
   constructor(db: Db, options: GatesOptions = {}) {
     this.#db = db;
     this.#now = options.now ?? Date.now;
     this.#policies = options.policies ?? {};
+    this.#resolveHead = options.resolveHead ?? null;
   }
 
   /**
@@ -163,6 +185,7 @@ export class Gates {
    */
   request(input: GateRequestInput): string {
     const policy = gatePolicy(input.gate);
+    assertPinsHead(input.gate, input.payload);
     const id = `g_${randomUUID().slice(0, 8)}`;
 
     // §M.8.2 step 5 — the clause set is part of what is hashed, so approval binds to what was
@@ -252,6 +275,20 @@ export class Gates {
    */
   assertExecutable(gateId: string, payload: unknown): void {
     const row = this.#row(gateId);
+    // A1 — a diff-bearing gate must go through `assertExecutableNow`, which re-reads the
+    // branch. Refusing here rather than silently skipping the re-read is what stops the
+    // invariant from being bypassed by picking the convenient method.
+    if (DIFF_BEARING.has(row.gate as GateName)) {
+      throw new GateError(
+        `gate ${gateId} (${row.gate}) pins a commit — use assertExecutableNow so the branch is re-read (A1)`,
+      );
+    }
+    this.#check(gateId, payload);
+  }
+
+  /** The payload and lifecycle checks, shared by both entry points. */
+  #check(gateId: string, payload: unknown): void {
+    const row = this.#row(gateId);
 
     if (row.decided_at == null) throw new GateError(`gate ${gateId} has not been decided`);
     if (row.decision !== 'approve') {
@@ -275,6 +312,40 @@ export class Gates {
       throw new GateError(
         `gate ${gateId} payload changed after approval: approved ${row.payload_hash.slice(0, 12)}, ` +
           `about to execute ${actual.slice(0, 12)}. Refusing.`,
+      );
+    }
+  }
+
+
+  /**
+   * INVARIANT A1 — the same checks, plus the branch head as it is *right now*.
+   *
+   * §M.7.1: a `gate.push` or `gate.pr_open` payload that did not pin the commit let an agent
+   * add commits between approval and execution, and the approval would still execute — against
+   * code no human ever saw. The payload now carries `head_sha` (enforced at request time), and
+   * this re-reads the branch immediately before the write.
+   *
+   * Async, and therefore separate from the synchronous `assertExecutable`: reading a branch
+   * head is a subprocess. Every diff-bearing write goes through here; `assertExecutable`
+   * refuses those gates outright so the sync path cannot be used to skip the re-read.
+   */
+  async assertExecutableNow(gateId: string, payload: unknown): Promise<void> {
+    this.#check(gateId, payload);
+
+    const row = this.#row(gateId);
+    if (!DIFF_BEARING.has(row.gate as GateName)) return;
+
+    const pinned = headOf(payload);
+    const current = await this.#resolveHead?.(row.task_id);
+    // No resolver configured (a test harness, an attached lane with no branch) means the head
+    // cannot be re-read. The pin is still checked against the hash, which is the half that
+    // does not need git.
+    if (current == null || pinned == null) return;
+
+    if (current !== pinned) {
+      throw new GateError(
+        `the branch moved after approval — re-approve. ` +
+          `Approved ${pinned.slice(0, 8)}, branch is now at ${current.slice(0, 8)}.`,
       );
     }
   }
@@ -363,6 +434,8 @@ export class Gates {
     requested_at: number;
     payload_hash: string;
     payload_json: string;
+    gate: string;
+    task_id: string;
   } {
     const row = this.#db.prepare('SELECT * FROM gate_request WHERE id = ?').get(gateId) as
       | {
@@ -372,6 +445,8 @@ export class Gates {
           requested_at: number;
           payload_hash: string;
           payload_json: string;
+          gate: string;
+          task_id: string;
         }
       | undefined;
     if (!row) throw new GateError(`unknown gate ${gateId}`);
@@ -430,4 +505,26 @@ function payloadIsDirty(payload: unknown): boolean {
   if (payload == null || typeof payload !== 'object') return true;
   const dirty = (payload as { dirty?: unknown }).dirty;
   return dirty !== false;
+}
+
+/**
+ * A1, the type half — a diff-bearing gate must pin the commit it approves.
+ *
+ * Checked at request time so a payload without `head_sha` can never reach the database. The
+ * alternative, checking only at execution, would let a gate sit in the approval queue for a day
+ * before anyone discovered it was unexecutable.
+ */
+function assertPinsHead(gate: GateName, payload: unknown): void {
+  if (!DIFF_BEARING.has(gate)) return;
+  if (headOf(payload) == null) {
+    throw new GateError(
+      `${gate} must pin the commit it approves: payload needs a head_sha (OSADE-MOSS A1)`,
+    );
+  }
+}
+
+function headOf(payload: unknown): string | null {
+  if (payload == null || typeof payload !== 'object') return null;
+  const value = (payload as { head_sha?: unknown }).head_sha;
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }

@@ -267,7 +267,13 @@ describe.skipIf(!E2E)('M1 acceptance — the failure loop turns once, for real',
   }, 300_000);
 
   it('the commit is blocked until approved — §14', async () => {
-    const payload = { message: 'fix: make the check pass', files: ['answer.txt'] };
+    // OSADE-MOSS A1 — a diff-bearing gate pins the commit it approves, and goes through
+    // `assertExecutableNow` so the branch is re-read before the write.
+    const payload = {
+      message: 'fix: make the check pass',
+      files: ['answer.txt'],
+      head_sha: 'a1c0ffee1234567890abcdef',
+    };
     const gateId = gates.request({ taskId, gate: 'gate.push', payload });
 
     // §6 row 3 — an undecided gate is the loudest thing in the ledger.
@@ -275,15 +281,15 @@ describe.skipIf(!E2E)('M1 acceptance — the failure loop turns once, for real',
     expect(deriveStatus(facts, Date.now())).toBe('awaiting_approval');
 
     // …and it will not execute while undecided.
-    expect(() => gates.assertExecutable(gateId, payload)).toThrow(/has not been decided/);
+    await expect(gates.assertExecutableNow(gateId, payload)).rejects.toThrow(/has not been decided/);
 
     gates.decide(gateId, 'approve');
-    expect(() => gates.assertExecutable(gateId, payload)).not.toThrow();
+    await expect(gates.assertExecutableNow(gateId, payload)).resolves.toBeUndefined();
 
     // §11.2 — the approval is bound to these exact bytes.
-    expect(() => gates.assertExecutable(gateId, { ...payload, message: 'something else' })).toThrow(
-      /payload changed after approval/,
-    );
+    await expect(
+      gates.assertExecutableNow(gateId, { ...payload, message: 'something else' }),
+    ).rejects.toThrow(/payload changed after approval/);
 
     facts = getTaskFacts(db, taskId)!;
     expect(deriveStatus(facts, Date.now())).toBe('awaiting_review');

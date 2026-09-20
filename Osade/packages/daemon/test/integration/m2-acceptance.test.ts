@@ -57,7 +57,7 @@ const PR_AFTER_REVIEW = {
   html_url: 'https://github.com/acme/widget/pull/88',
   state: 'open',
   merged: false,
-  draft: false,
+  draft: false, head_sha: 'a1c0ffee',
   mergeable_state: 'clean',
   head: { sha: 'newsha' },
 };
@@ -161,7 +161,7 @@ describe('M2 acceptance — the contribution loop', () => {
       body: `Closes #${ISSUE.number}.`,
       head: plan.head,
       base: plan.prBase,
-      draft: false,
+      draft: false, head_sha: 'a1c0ffee',
     };
     const gateId = await writer.requestGate(taskId, 'gate.pr_open', payload);
 
@@ -243,7 +243,7 @@ describe('M2 acceptance — the contribution loop', () => {
       body: 'b',
       head: 'osade/x',
       base: 'main',
-      draft: false,
+      draft: false, head_sha: 'a1c0ffee',
     };
     const gateId = await writer.requestGate(taskId, 'gate.pr_open', payload);
     gates.decide(gateId, 'approve');

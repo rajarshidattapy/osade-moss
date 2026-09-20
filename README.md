@@ -52,15 +52,14 @@ These features are being built for the **YC Fall 2026 × Moss Zero Latency Build
 sits on the critical path of every turn across every lane, which is why speed matters here. Moss
 is a derived, rebuildable index; SQLite stays the only source of truth.
 
-**Built so far:** the retrieval layer (one writer, a `retrieval_log` the database triggers
-maintain, `osade index rebuild` as the defined recovery); per-turn context assembly with a cited
-block on every prompt; **self-maintaining APIs end to end** — changelog extraction gated on human
-confirmation, tree-sitter chunking with resolved-context enrichment, retrieval-vs-grep discovery,
-waves gated on a green canary, and lanes that publish their verified fixes to their siblings
-(`osade migrate`); and **compliance on the gate** — policy clauses matched to the hunks they
-cover, bound into the approval hash, with `requires_ack` clauses blocking approval until a named
-human acknowledges them (`osade policy`). Multiplayer lanes and human-approval attestation are
-still to come.
+All four are built, on a shared retrieval layer with one writer, a `retrieval_log` the database
+triggers maintain, and `osade index rebuild` as the defined recovery for every failure mode.
+Every agent turn carries a cited, budgeted context block.
+
+Drive them from the window or the terminal — `osade migrate`, `osade team`, `osade catchup`,
+`osade attest verify`, `osade policy`, `osade audit export`. The surfaces are identical because
+the rules live in the daemon: a role matrix no procedure can skip, gates that bind to the exact
+commit, and policy clauses hashed into the approval.
 
 ## Quickstart
 
@@ -126,14 +125,19 @@ terminal substrate  PTYs, worktrees, agent detection, session persistence
 Osade doesn't reimplement terminals. A headless substrate owns PTYs, git worktrees and agent
 detection, and Osade drives it over a JSON API.
 
-Three invariants are worth knowing before you read the code:
+A handful of invariants are worth knowing before you read the code:
 
 - **No `status` column.** Task status is a pure function over durable facts, recomputed on every
   read. A flaky probe can't kill a live agent.
 - **One event path.** Every change reaches every client through a SQLite trigger into `change_log`.
   If the UI didn't update, the write didn't go through the database.
 - **Nothing public without a gate.** Every push, PR and comment is a hashed approval request first,
-  re-checked at execution.
+  re-checked at execution — and a diff-bearing gate pins the commit it approves, so an agent
+  cannot add work between approval and execution.
+- **The index is derived.** One writer, SQLite as the only input, droppable and rebuildable at
+  any time. Retrieval degrades to full-text search rather than failing a turn.
+- **Nobody but the owner gets a shell.** Every procedure declares a role in one table, and a
+  procedure without one is refused. A non-loopback listener requires auth and TLS, fatally.
 
 ## Why it works this way
 

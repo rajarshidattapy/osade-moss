@@ -79,6 +79,29 @@ export class ScmClient {
     }
   }
 
+  /**
+   * §M.6.2 — who does this GitHub token belong to?
+   *
+   * The *only* place a teammate's token is used, and it is used for exactly one question. The
+   * token is not stored, not cached, and never used for a write: every GitHub write still goes
+   * through the host's token, behind a gate. A separate Octokit is built for the call and
+   * discarded with it, so the teammate's credential never joins this client's state.
+   *
+   * Null on any failure — expired, revoked, wrong scopes, GitHub down. The caller turns that
+   * into "that token does not identify anyone", which is the only thing a joiner needs to know
+   * and the only thing worth telling them.
+   */
+  async loginFor(githubToken: string): Promise<string | null> {
+    try {
+      const octokit = new Octokit({ auth: githubToken });
+      const response = await octokit.request('GET /user');
+      const login = (response.data as { login?: unknown }).login;
+      return typeof login === 'string' && login.length > 0 ? login : null;
+    } catch {
+      return null;
+    }
+  }
+
   get rateLimit(): RateLimit | null {
     return this.#rateLimit;
   }

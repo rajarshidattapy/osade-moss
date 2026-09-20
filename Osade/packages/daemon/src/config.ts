@@ -25,12 +25,23 @@ export interface RetrievalConfig {
   readonly queryTimeoutMs: number;
 }
 
+/** §M.9.2 — `server.listen` is the one setting that changes ARCH §5.5's network posture. */
+export interface ServerConfig {
+  readonly listen: 'loopback' | 'lan';
+  readonly port: number;
+  readonly sessionTtlHours: number;
+}
+
 export interface OsadeConfig {
   readonly retrieval: RetrievalConfig;
+  readonly server: ServerConfig;
 }
 
 export const DEFAULT_CONFIG: OsadeConfig = {
   retrieval: { enabled: true, cloudSync: false, budgetTokens: 1_200, queryTimeoutMs: 25 },
+  // Loopback by default, always. Opting into `lan` is a deliberate act, and M1 then requires
+  // auth and TLS before anything binds (§M.6.1).
+  server: { listen: 'loopback', port: 0, sessionTtlHours: 12 },
 };
 
 export function loadConfig(
@@ -46,7 +57,10 @@ export function loadConfig(
   }
   try {
     const parsed = JSON.parse(raw) as Partial<OsadeConfig>;
-    return { retrieval: { ...DEFAULT_CONFIG.retrieval, ...(parsed.retrieval ?? {}) } };
+    return {
+      retrieval: { ...DEFAULT_CONFIG.retrieval, ...(parsed.retrieval ?? {}) },
+      server: { ...DEFAULT_CONFIG.server, ...(parsed.server ?? {}) },
+    };
   } catch (err) {
     options.onWarning?.(
       `${path} is not valid JSON, so defaults are in use: ${err instanceof Error ? err.message : String(err)}`,

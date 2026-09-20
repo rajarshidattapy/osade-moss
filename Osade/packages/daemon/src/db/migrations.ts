@@ -23,7 +23,14 @@ const CORE_CDC_TABLES = [
   'turn_checkpoint',
 ] as const;
 
-export const CDC_TABLES = [...CORE_CDC_TABLES, 'chat_turn', 'context_pack'] as const;
+export const CDC_TABLES = [
+  ...CORE_CDC_TABLES,
+  'chat_turn',
+  'context_pack',
+  'attestation',
+  'presence',
+  'task_claim',
+] as const;
 
 export type CdcTable = (typeof CDC_TABLES)[number];
 
@@ -465,6 +472,8 @@ export const RETRIEVAL_TABLES = [
   'policy_clause',
   // Migration 17 — F1's verified fixes, into `turns` with verified = '1'.
   'fix_pattern',
+  // Migration 15 — incoming pull requests, into `prs` for near-duplicate detection.
+  'pr_record',
 ] as const;
 
 /**
@@ -782,6 +791,135 @@ CREATE INDEX fix_pattern_hash_idx ON fix_pattern(pattern_hash);
 CREATE INDEX fix_pattern_task_idx ON fix_pattern(task_id);
 `;
 
+/**
+ * M15 — F3, human-approval attestation and slop signals (OSADE-MOSS §M.7).
+ *
+ * The record this table exists to make is narrow and worth stating exactly: *this Osade
+ * instance attests that the GitHub user it authenticated approved this exact commit after
+ * these checks passed.* It is only worth anything because A1 (§M.7.1) makes `head_sha` part of
+ * what was approved — an attestation over a payload that did not pin a commit would be signing
+ * a claim nobody could check.
+ *
+ * `statement_json` is stored verbatim rather than rebuilt on read. A signature covers bytes,
+ * and bytes that get regenerated are bytes that can drift.
+ *
+ * **INVARIANT A2 (§M.7.5): signals are never acted on publicly without a gate.** `pr_signal`
+ * has no "action" column and no "resolved" flag for that reason: nothing here closes, labels or
+ * comments on anything. A maintainer replying to a duplicate goes through `gate.pr_comment`
+ * like any other public speech.
+ */
+const M015_ATTESTATION = `
+CREATE TABLE attestation (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  gate_id TEXT NOT NULL REFERENCES gate_request(id) ON DELETE CASCADE,
+  -- Canonical JSON: sorted keys, no whitespace, 'v' first. Stored as signed.
+  statement_json TEXT NOT NULL,
+  signature TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  -- 1 = this install's key vouches for the identity; 2 = the approver's own SSH key does.
+  tier INTEGER NOT NULL DEFAULT 1,
+  head_sha TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX attestation_task_idx ON attestation(task_id);
+CREATE INDEX attestation_head_idx ON attestation(head_sha);
+
+CREATE TABLE pr_record (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+  number INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body_excerpt TEXT NOT NULL,
+  -- Structural, not free text: files touched plus normalised hunk hashes (§M.7.5).
+  diff_summary TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  opened_at INTEGER NOT NULL,
+  fetched_at INTEGER NOT NULL,
+  UNIQUE (repo_id, number)
+);
+
+CREATE TABLE pr_signal (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+  pr_number INTEGER NOT NULL,
+  -- 'near_duplicate' | 'attested' | 'attestation_stale' | 'attestation_invalid'
+  kind TEXT NOT NULL,
+  related_pr INTEGER,
+  -- Shown, never a verdict. The label reads "similar to #412 (0.91)", never "spam".
+  score REAL,
+  detail_json TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE (repo_id, pr_number, kind, related_pr)
+);
+CREATE INDEX pr_signal_repo_idx ON pr_signal(repo_id, pr_number);
+`;
+
+/**
+ * M13 — F2, multiplayer lanes (OSADE-MOSS §M.6.2).
+ *
+ * **GitHub login is the only identity.** There is no Osade account, no password column and no
+ * local user table — because §M.6.3 needs `decided_by` to mean something outside this machine,
+ * and "alice" only means something if GitHub says who alice is.
+ *
+ * **INVARIANT: the token is never stored.** `member_session.token_hash` is a sha256 of an
+ * opaque random string; the string itself goes to the client once and is never written down.
+ * A database that leaks cannot be replayed as a session. The teammate's *GitHub* token is used
+ * once, to answer "who are you", and discarded — every GitHub write still uses the host's
+ * token, behind gates.
+ *
+ * `presence` and `task_claim` are CDC tables and deliberately carry no status: who is looking
+ * at a lane and who is driving it are facts, and the UI derives "is Priya here?" from a
+ * heartbeat timestamp rather than from a boolean someone has to remember to clear.
+ */
+const M013_MEMBERS = `
+CREATE TABLE member (
+  login TEXT PRIMARY KEY,               -- GitHub login, the only identity
+  role TEXT NOT NULL,                   -- 'owner' | 'maintainer' | 'viewer'
+  invited_by TEXT NOT NULL,
+  invited_at INTEGER NOT NULL,
+  removed_at INTEGER
+);
+
+CREATE TABLE member_session (
+  -- sha256 of an opaque random token. The token itself is never stored, anywhere.
+  token_hash TEXT PRIMARY KEY,
+  login TEXT NOT NULL REFERENCES member(login) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+CREATE INDEX member_session_login_idx ON member_session(login);
+
+-- §M.6.5 — how far each member has read, so catch-up knows what "since you left" means.
+CREATE TABLE member_cursor (
+  login TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  last_seen_seq INTEGER NOT NULL,
+  PRIMARY KEY (login, chat_id)
+);
+
+CREATE TABLE presence (                 -- CDC table; row_id = task_id
+  login TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (login, task_id)
+);
+
+-- §M.6.7 — advisory. It records who is driving; it does not lock anything.
+CREATE TABLE task_claim (               -- CDC table; row_id = task_id
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  login TEXT NOT NULL,
+  claimed_at INTEGER NOT NULL,
+  released_at INTEGER,
+  PRIMARY KEY (task_id, login)
+);
+
+-- §M.6.2 — 'github:<login>' | 'agent:<id>' | 'automation'. Null for pre-F2 rows.
+ALTER TABLE chat_turn ADD COLUMN author TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: 1,
@@ -846,17 +984,21 @@ export const MIGRATIONS: readonly Migration[] = [
       M012_TRIGGER_TABLES.map(retrievalTriggers).join('\n') +
       cdcTriggers('context_pack'),
   },
-  // 13 is deliberately absent. OSADE-MOSS §M.3 assigns it to F2's `member` / `presence` tables,
-  // which are not built yet. Migrations are applied by id, so a gap costs nothing, and keeping
-  // the PRD's numbering means every migration here can be read against the section that
-  // specified it. Do not renumber this to close the hole.
+  {
+    id: 13,
+    name: 'F2 — members, sessions, cursors, presence and lane claims',
+    sql: M013_MEMBERS + cdcTriggers('presence') + cdcTriggers('task_claim'),
+  },
   {
     id: 14,
     name: 'F1 — migrations, changes, targets, code chunks, call sites, discovery misses',
     sql: M014_MIGRATION + retrievalTriggers('code_chunk'),
   },
-  // 15 is reserved for F3's attestation tables (§M.3), which are not built yet. See the note
-  // above 14 for why the gap is kept rather than closed.
+  {
+    id: 15,
+    name: 'F3 — attestations, PR records, and the signals a maintainer triages by',
+    sql: M015_ATTESTATION + cdcTriggers('attestation') + retrievalTriggers('pr_record'),
+  },
   {
     id: 16,
     name: 'F4 — policies, clauses, and the clauses bound into a gate',

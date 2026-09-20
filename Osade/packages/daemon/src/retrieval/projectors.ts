@@ -68,6 +68,18 @@ export function paddedSeq(seq: number): string {
   return Math.max(0, Math.trunc(seq)).toString().padStart(12, '0');
 }
 
+/**
+ * A sortable clock key for the `turns` namespace — epoch *seconds*, zero-padded.
+ *
+ * Every document in `turns` carries one, because a catch-up window spans turns, gate decisions
+ * and verify runs, and those share no sequence number: a turn's `seq` counts within one task,
+ * while a chat has several. One clock covers all three. Seconds rather than milliseconds so the
+ * value stays inside twelve digits and lexical order keeps matching numeric order.
+ */
+export function paddedAt(ms: number): string {
+  return paddedSeq(Math.floor(ms / 1000));
+}
+
 /** Keep a document readable and bounded. Long agent turns are mostly tool noise past this. */
 const MAX_TEXT = 1_200;
 
@@ -124,6 +136,7 @@ const CHAT_TURN = defineProjector<TurnRow>({
           head_sha: row.base_sha,
           kind: row.role === 'user' ? 'turn.user' : 'turn.agent',
           seq: paddedSeq(row.seq),
+          at: paddedAt(row.created_at),
           author:
             row.role === 'user'
               ? row.origin === 'automation'
@@ -184,6 +197,7 @@ const VERIFY_RUN = defineProjector<VerifyRow>({
           head_sha: row.head_sha,
           kind: passed ? 'verify.pass' : 'verify.fail',
           verified: passed && row.required === 1 ? '1' : undefined,
+          at: paddedAt(row.finished_at),
           author: 'automation',
         }),
       },
@@ -202,13 +216,14 @@ interface GateRow {
   decision: string | null;
   decided_by: string | null;
   decided_at: number | null;
+  requested_at: number;
   execution_error: string | null;
 }
 
 const GATE_REQUEST = defineProjector<GateRow>({
   ns: 'turns',
   select: `SELECT g.id, g.task_id, t.chat_id, t.repo_id, g.gate, g.decision, g.decided_by,
-                  g.decided_at, g.execution_error
+                  g.decided_at, g.requested_at, g.execution_error
              FROM gate_request g JOIN task t ON t.id = g.task_id
             WHERE g.id IN (%IDS%)`,
   project: (row) => {
@@ -229,6 +244,7 @@ const GATE_REQUEST = defineProjector<GateRow>({
           chat_id: row.chat_id ?? row.task_id,
           repo_id: row.repo_id,
           kind: decided ? (row.decision === 'approve' ? 'gate.approved' : 'gate.rejected') : 'gate.requested',
+          at: paddedAt(row.decided_at ?? row.requested_at),
           author: row.decided_by ?? 'automation',
         }),
       },
@@ -248,6 +264,7 @@ interface AgentFactRow {
   final_message: string | null;
   terminated: number;
   external_block: string | null;
+  last_event_at: number | null;
   base_sha: string;
 }
 
@@ -260,7 +277,7 @@ interface AgentFactRow {
 const AGENT_FACT = defineProjector<AgentFactRow>({
   ns: 'turns',
   select: `SELECT a.task_id, t.chat_id, t.repo_id, t.agent_id, a.last_event, a.substrate_state,
-                  a.final_message, a.terminated, a.external_block, t.base_sha
+                  a.final_message, a.terminated, a.external_block, a.last_event_at, t.base_sha
              FROM agent_fact a JOIN task t ON t.id = a.task_id
             WHERE a.task_id IN (%IDS%)`,
   project: (row) => {
@@ -297,6 +314,7 @@ const AGENT_FACT = defineProjector<AgentFactRow>({
           repo_id: row.repo_id,
           head_sha: row.base_sha,
           kind,
+          at: row.last_event_at == null ? undefined : paddedAt(row.last_event_at),
           author: `agent:${agent}`,
         }),
       },
@@ -495,6 +513,7 @@ interface FixPatternRow {
   line: number;
   pattern_hash: string;
   hunk: string;
+  created_at: number;
   agent_id: string | null;
 }
 
@@ -509,7 +528,7 @@ interface FixPatternRow {
 const FIX_PATTERN = defineProjector<FixPatternRow>({
   ns: 'turns',
   select: `SELECT f.id, f.task_id, t.chat_id, f.repo_id, f.migration_id, f.head_sha, f.file,
-                  f.line, f.pattern_hash, f.hunk, t.agent_id
+                  f.line, f.pattern_hash, f.hunk, f.created_at, t.agent_id
              FROM fix_pattern f JOIN task t ON t.id = f.task_id
             WHERE f.id IN (%IDS%)`,
   project: (row) => [
@@ -530,9 +549,59 @@ const FIX_PATTERN = defineProjector<FixPatternRow>({
         migration_id: row.migration_id ?? undefined,
         kind: 'fix_pattern',
         verified: '1',
+        at: paddedAt(row.created_at),
         pattern_hash: row.pattern_hash,
         file: row.file,
         author: `agent:${row.agent_id ?? 'unknown'}`,
+      }),
+    },
+  ],
+});
+
+// ── pr_record → ns 'prs' (F3, §M.7.5) ────────────────────────────────────────
+
+interface PrRecordRow {
+  id: string;
+  repo_id: string;
+  number: number;
+  author: string;
+  title: string;
+  body_excerpt: string;
+  diff_summary: string;
+  head_sha: string;
+  opened_at: number;
+}
+
+/**
+ * Near-duplicate detection indexes *structure*, not prose.
+ *
+ * `diff_summary` is the files touched plus the normalised hunk hashes from §M.5.5 — two agents
+ * solving the same issue write different words about the same change, so the title and body are
+ * the weakest signal available. The body excerpt is included because it is sometimes the only
+ * thing distinguishing two structurally identical PRs, but it leads with the structure.
+ *
+ * Raw diffs are deliberately not indexed: too large, and dominated by context lines that are
+ * identical across unrelated changes.
+ */
+const PR_RECORD = defineProjector<PrRecordRow>({
+  ns: 'prs',
+  select: `SELECT id, repo_id, number, author, title, body_excerpt, diff_summary, head_sha,
+                  opened_at
+             FROM pr_record WHERE id IN (%IDS%)`,
+  project: (row) => [
+    {
+      id: docId('prs', 'pr_record', row.id),
+      text: clamp(`${row.title}\n${row.diff_summary}\n${row.body_excerpt}`, 2_000),
+      meta: meta({
+        ns: 'prs',
+        src_table: 'pr_record',
+        src_id: row.id,
+        head_sha: row.head_sha,
+        repo_id: row.repo_id,
+        pr_number: String(row.number),
+        kind: 'pr',
+        author: `github:${row.author}`,
+        opened_at: paddedSeq(Math.floor(row.opened_at / 1000)),
       }),
     },
   ],
@@ -548,4 +617,5 @@ export const PROJECTORS: Readonly<Record<RetrievalTable, Projector>> = {
   code_chunk: CODE_CHUNK,
   policy_clause: POLICY_CLAUSE,
   fix_pattern: FIX_PATTERN,
+  pr_record: PR_RECORD,
 };

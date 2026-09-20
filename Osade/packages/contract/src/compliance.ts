@@ -67,3 +67,36 @@ export const PolicyReloadResult = z.object({
   removed: z.number().int(),
 });
 export type PolicyReloadResult = z.infer<typeof PolicyReloadResult>;
+
+/**
+ * §M.8.4 — one gate, with everything that surrounded it.
+ *
+ * **Nothing here is computed by a model.** Every field is a stored fact or a hash of one, which
+ * is what makes the export usable as evidence: a reader can tell which parts were recorded
+ * without having to know which parts were inferred, because none of them were.
+ */
+export const AuditRow = z.object({
+  gate_id: z.string(),
+  gate: z.string(),
+  repo: z.string(),
+  task_id: z.string(),
+  requested_at: z.string(),
+  decided_at: z.string().nullable(),
+  decision: z.string().nullable(),
+  decided_by: z.string().nullable(),
+  payload_hash: z.string(),
+  head_sha: z.string().nullable(),
+  executed_at: z.string().nullable(),
+  execution_error: z.string().nullable(),
+  verification: z.array(
+    z.object({ step: z.string(), cmd: z.string(), exit: z.number().nullable() }),
+  ),
+  clauses_shown: z.array(
+    z.object({ ref: z.string(), policy: z.string(), file_sha: z.string() }),
+  ),
+  clauses_acked: z.array(z.object({ ref: z.string(), by: z.string(), at: z.string() })),
+  attestation_id: z.string().nullable(),
+  attestation_signature: z.string().nullable(),
+  attestation_key_id: z.string().nullable(),
+});
+export type AuditRow = z.infer<typeof AuditRow>;
