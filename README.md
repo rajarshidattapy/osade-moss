@@ -1,24 +1,61 @@
-![Osade](./assets/banner.png)
-
 # Osade
 
-**Run all your coding agents together on real repositories — from one desktop app.**
+**Your team and its coding agents, one live workspace.**
 
-Local-first · Bring your own agent · Nothing leaves your machine
+Bring your own agent · Human-approved, always
 
 ---
 
-Osade is a desktop workspace for working with coding agents on real codebases. Open a repo, type
-into a chat, and an agent starts working in a terminal you don't have to look at. Mention a second
-agent and it gets its own branch and runs alongside the first. When work is worth shipping, Osade
-verifies it, shows you the diff, and asks before anything leaves your machine.
+Osade is a desktop workspace where you and your teammates run coding agents on real repositories
+together. Open a repo and type into a chat, and an agent starts working. Mention a second agent and
+it gets its own branch next to the first. A teammate can join the session, see what happened while
+they were gone, redirect an agent, or approve its next move.
 
-It doesn't ship a model. It drives the agent CLIs you already pay for.
+Nothing ships until it's verified and a named human signs off. Osade never merges.
+
+It doesn't ship a model. It drives the agent CLIs you already pay for: `claude`, `codex`, `opencode`, `pi`.
+
+## What you can do with it
+
+**Talk to an agent instead of configuring a task.** A new chat is an empty box. Type, and the agent
+starts. Branch names and titles come from what you wrote.
+
+**Run several agents in one conversation.** Put `@claude` and `@codex` on separate lines and you get
+two agents, each on its own branch, sharing one transcript and learning from each other's verified
+work.
+
+**Stay on your real checkout.** The first chat attaches to your working tree on whatever branch is
+checked out, so there's no surprise branch. Extra chats and agents get isolated worktrees
+automatically, so two agents never write to the same tree.
+
+**Review without leaving the window.** Files, Checks, Diff and Rules sit next to the chat. The
+composer attaches whatever you're looking at, so you can ask "why did you change this" while
+reading a hunk.
+
+**Approve anything that leaves the machine.** Commits, pushes, PRs and comments are gated. Approval
+binds to the exact payload, and a change after approval voids it.
+
+## New: Osade × Moss 🚧
+
+These features are being built for the **YC Fall 2026 × Moss Zero Latency Builder Sprint**, with
+[Moss](https://moss.dev) as the shared-context layer.
+
+| | Feature | What it does |
+| --- | --- | --- |
+| 🔁 | **Self-maintaining APIs** | An SDK ships a breaking change. Osade finds every affected call site across your repos, including wrappers and aliased imports that grep misses, and runs one agent lane per repo to a verified PR. |
+| 👥 | **Multiplayer lanes** | Teammates join a live session under their GitHub identity, catch up from cited history in milliseconds, and approve gates as themselves. |
+| ✍️ | **Human-approved PRs** | Every PR carries a signed record of which human approved which exact commit after which checks passed. Maintainers get near-duplicate PR detection. |
+| 📋 | **Compliance on the gate** | The policy clauses a diff touches show up on the approval card, bind into the approval, and export as audit evidence. |
+
+**Where Moss fits:** every agent turn is assembled from filtered, budgeted, cited retrievals
+(conventions, sibling agents' verified fixes, chat history), targeting p95 under 30 ms. Retrieval
+sits on the critical path of every turn across every lane, which is why speed matters here. Moss
+is a derived, rebuildable index; SQLite stays the only source of truth.
 
 ## Quickstart
 
 You need **Node.js 22+**, **pnpm** (`corepack enable`), **git**, and at least one agent CLI on your
-`PATH` — `claude`, `codex`, `opencode` or `pi`.
+`PATH`.
 
 ```bash
 git clone https://github.com/OsadeOSS/Osade.git
@@ -30,24 +67,28 @@ pnpm --filter @osade/desktop start
 
 The window opens. Open a folder, type something, press Enter.
 
-Or put `osade` on your PATH from this checkout (Windows and POSIX):
+To put `osade` on your PATH (Windows and POSIX):
 
 ```bash
 node scripts/install-cli.mjs
 ```
 
-Open a new terminal, `cd` into any repo, and type `osade .` — the window opens (or comes
-to the front) on that repository, the way `code .` does.
+Then `osade .` in any repo opens the window on it, the way `code .` does.
 
-macOS, Linux and Windows. Everything Osade writes lives in `~/.osade`
-(`%USERPROFILE%\.osade` on Windows) — delete it to reset completely.
+Osade runs on macOS, Linux and Windows. Everything it writes lives in `~/.osade`
+(`%USERPROFILE%\.osade` on Windows); delete that folder to reset completely.
 
-Optional: run `gh auth login` first and Osade reuses that login for issues and pull requests
-instead of asking you to authorize a second OAuth app.
+Optional:
 
-Windows desktop shortcut
+- Set `OSADE_GITHUB_TOKEN` and Osade uses it for issues and PRs. Without it, GitHub features stay
+  off. (🚧 Picking up an existing `gh auth login` session is planned, not wired up.)
+- 🚧 `MOSS_PROJECT_ID` / `MOSS_PROJECT_KEY` are reserved for Moss retrieval, which isn't wired in
+  yet. Today retrieval is always local SQLite full-text search.
 
-After a successful start, so that `apps/desktop/dist` exists:
+<details>
+<summary>Windows desktop shortcut</summary>
+
+After a successful start (so `apps/desktop/dist` exists):
 
 ```powershell
 powershell -File scripts/install-desktop-shortcut.ps1
@@ -55,88 +96,63 @@ powershell -File scripts/install-desktop-shortcut.ps1
 
 This launches the checkout, not a packaged installer.
 
-## What you can do with it
-
-**Talk to an agent instead of configuring a task.** A new chat is an empty box. Type, and the agent
-starts. Branch names and titles come from what you wrote.
-
-**Run several agents in one conversation.** `@claude` and `@codex` on separate lines fan out to two
-agents, each on its own branch, sharing one transcript. Each one gets a short digest of what the
-others have done.
-
-**Stay on your real checkout by default.** The first chat in a repo attaches to your working tree on
-whatever branch is already checked out — no surprise branch, no worktree you didn't ask for. Branch
-out when you're ready, bringing uncommitted changes with you. Additional chats and extra agents get
-isolated worktrees automatically, so two agents are never writing to the same tree.
-
-**Browse, diff and verify without leaving the window.** Files, Checks, Diff and Rules sit next to the
-chat. The composer stays live on all of them and attaches what you're looking at, so "why did you
-change this" works while you're reading a hunk.
-
-**Approve anything that leaves the machine.** Commits, pushes, PRs and comments are gated. Osade
-never merges.
+</details>
 
 ## How it works
 
-Three processes. Two of them keep running when you close the window, so agents don't die with the
-app.
+Three processes. The daemon and the substrate keep running when you close the window, so agents
+don't die with the app.
 
 ```text
 Electron app        chats, lanes, files, diffs, checks, gates
-      │  tRPC + WebSocket, 127.0.0.1 only
-Osade daemon        chats, lanes, verification, gates, GitHub, conventions
-      │             SQLite + change_log + CDC
+      │  tRPC + WebSocket over loopback (127.0.0.1)
+Osade daemon        lanes, verification, gates, GitHub, conventions, retrieval
+      │             SQLite facts + change_log → CDC to every connected client
       │  JSON API over a local socket
 terminal substrate  PTYs, worktrees, agent detection, session persistence
 ```
 
-Osade doesn't reimplement terminals. A headless substrate owns PTYs, VT parsing, git worktrees and
-agent process detection; Osade drives it over a JSON API. Watching an agent live opens a real
-terminal client attached to the same session — embedding the terminal is deliberately deferred
-([ADR 0001](docs/architechture/adr/0001-no-embedded-terminal-in-m0.md)).
+Osade doesn't reimplement terminals. A headless substrate owns PTYs, git worktrees and agent
+detection, and Osade drives it over a JSON API.
 
-Two invariants are worth knowing if you read the code:
+Three invariants are worth knowing before you read the code:
 
-- **No** `status` **column.** Task status is a pure function over durable facts — what the substrate
-observed, what verification returned, what GitHub reported — recomputed on every read. A flaky
-probe can't kill a live agent.
-- **One event path.** Every change reaches the UI through a SQLite trigger into `change_log`. If the
-UI didn't update, the write didn't go through the database.
-
+- **No `status` column.** Task status is a pure function over durable facts, recomputed on every
+  read. A flaky probe can't kill a live agent.
+- **One event path.** Every change reaches every client through a SQLite trigger into `change_log`.
+  If the UI didn't update, the write didn't go through the database.
+- **Nothing public without a gate.** Every push, PR and comment is a hashed approval request first,
+  re-checked at execution.
 
 ## Why it works this way
 
-Open source is closing the door on autonomous AI contributions. Godot banned autonomous agent use.
-curl shut down its bug bounty. Maintainers report roughly 1 in 10 AI PRs meets their bar.
+Open source is pushing back on autonomous AI contributions: maintainers are drowning in agent PRs
+that don't meet their bar. The bottleneck is review capacity, not code production, so a tool that
+produces *more* agent PRs makes things worse.
 
-The bottleneck is review capacity, not code production — so a tool that produces more agent PRs
-makes things worse. Osade optimizes for the opposite: **reduce the review cost of a contribution
-until an agent-assisted PR is cheaper to review than a human one.** That's why verification,
-evidence-cited conventions and human gates are core rather than optional, and why the highest-value
-thing an agent can do is often triage that produces no PR at all — reproduce a bug, bisect a
-regression, write a failing test.
+Osade optimizes for the opposite: **make an agent-assisted PR cheaper to review than a human one.**
+That's why verification, evidence-cited conventions and human gates are the core of the product
+rather than add-ons. It's also why the most valuable thing an agent can do is often triage that
+produces no PR at all: reproduce a bug, bisect a regression, write a failing test.
 
 The long version is in [docs/OSADE.md](docs/OSADE.md).
 
 ## Status
 
-Early and moving fast. Usable, not stable.
+Early and moving fast. Usable, not stable. The Moss features are under active development.
 
 ## Docs
 
-
-|                                    |                                                              |
-| ---------------------------------- | ------------------------------------------------------------ |
-| [docs/architechture.md](docs/architechture.md) | How it is built — processes, boundaries, invariants, in depth |
-| [docs/OSADE.md](docs/OSADE.md)     | Full spec — architecture, data model, invariants, milestones |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to work on Osade                                         |
-
-
-
+| | |
+| --- | --- |
+| [docs/architechture.md](docs/architechture.md) | How it's built: processes, boundaries, invariants |
+| [docs/OSADE.md](docs/OSADE.md) | Full spec: data model, invariants, milestones |
+| [docs/osadexmoss.md](docs/osadexmoss.md) | Moss features spec: retrieval layer, multiplayer, attestation, compliance |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to work on Osade |
 
 ## Contributing
 
-Issues and PRs welcome. If you're adding an agent, it's a catalog entry plus a detection manifest —
+Issues and PRs are welcome. Adding an agent means a catalog entry plus a detection manifest, with
 no orchestration changes. Behaviour branches on declared capabilities (`plan-mode`, `resume`,
 `hook-reporting`, `headless-run`), never on which agent it is.
 
