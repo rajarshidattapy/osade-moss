@@ -127,6 +127,22 @@ async function describeWorktreeFailure(
   return lines.join('\n');
 }
 
+/**
+ * The single spelling a repository path is stored under.
+ *
+ * Forward slashes, because that is what git reports and what every path comparison elsewhere
+ * in the daemon already normalises to. Upper-case drive letter, because Windows hands out both
+ * `c:\` and `C:\` for the same volume depending on who asked.
+ */
+export function canonicalRepoPath(path: string): string {
+  const slashed = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  return /^[a-z]:\//.test(slashed) ? slashed[0]!.toUpperCase() + slashed.slice(1) : slashed;
+}
+
+function lowerDrive(path: string): string {
+  return /^[A-Z]:\//.test(path) ? path[0]!.toLowerCase() + path.slice(1) : path;
+}
+
 export interface CreateTaskInput {
   repoPath: string;
   title: string;
@@ -1353,11 +1369,22 @@ export class LaunchTask {
    * The async work happens first, then a single atomic upsert: sqlite serializes statements, so
    * `ON CONFLICT DO NOTHING` followed by a read is race-free without a lock of our own.
    */
-  async ensureRepo(repoPath: string): Promise<string> {
+  async ensureRepo(rawPath: string): Promise<string> {
+    // One repository, one row. On Windows the same checkout arrives in two spellings — git's
+    // `rev-parse --show-toplevel` answers `C:/Users/...` while Node's `path.resolve` answers
+    // `C:\Users\...` — and `repo.path`'s UNIQUE constraint compares strings, so both used to
+    // insert. Everything keyed by repo (migration targets, code chunks, policies, conventions)
+    // then split silently across two ids for the same checkout.
+    const repoPath = canonicalRepoPath(rawPath);
     ensureRepoRules(repoPath);
-    const existing = this.#db.prepare('SELECT id FROM repo WHERE path = ?').get(repoPath) as
-      | { id: string }
-      | undefined;
+    // Matched against the canonical form of *stored* paths too, so a row written before this
+    // normalisation existed is found rather than duplicated.
+    const existing = this.#db
+      .prepare(
+        `SELECT id FROM repo
+          WHERE path = ? OR REPLACE(path, char(92), '/') = ? OR REPLACE(path, char(92), '/') = ?`,
+      )
+      .get(repoPath, repoPath, lowerDrive(repoPath)) as { id: string } | undefined;
     if (existing) return existing.id;
 
     const branch = await defaultBranch(repoPath);

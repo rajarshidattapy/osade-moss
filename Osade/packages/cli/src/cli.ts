@@ -100,6 +100,7 @@ Usage:
 
   osade migrate new <provider> <pkg> <to> <changelog-file>
   osade migrate changes <id>               extract changes from the changelog
+  osade migrate add-change <id> <kind> <old> <new> <desc>   enter one by hand
   osade migrate confirm <id>               approve the changes; nothing runs before this
   osade migrate target <id> <repo-id>...   assign targets, strata, arms and waves
   osade migrate chunk <id>                 parse and index the targets
@@ -350,6 +351,29 @@ async function migrateCommand(
       // §M.5.3 — a drop is not an error, but it is the one number worth seeing: it means the
       // model wrote a changelog line that was not in the changelog.
       if (dropped > 0) io.out(`dropped ${dropped} that did not quote the changelog\n`);
+      return 0;
+    }
+
+    case 'add-change': {
+      const [id, kind, oldSymbol, newSymbol, ...description] = rest;
+      if (!id || !kind || description.length === 0) {
+        io.err(
+          'usage: osade migrate add-change <id> <rename|signature|removal|behavior> ' +
+            '<old-symbol|-> <new-symbol|-> <description>\n',
+        );
+        return 2;
+      }
+      // §M.5.3 — hand entry. A human is the evidence, so unlike an extracted change this
+      // needs no changelog citation. It is also the only way to drive a migration without a
+      // headless agent, which is what makes the flow testable end to end.
+      const { changeId } = await api.migrationAddChange({
+        migrationId: id,
+        kind,
+        ...(oldSymbol && oldSymbol !== '-' ? { oldSymbol } : {}),
+        ...(newSymbol && newSymbol !== '-' ? { newSymbol } : {}),
+        description: description.join(' '),
+      });
+      io.out(`${changeId}\n`);
       return 0;
     }
 

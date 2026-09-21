@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { SubstratePaneId, SubstrateTabId, SubstrateWorkspaceId } from '@osade/contract';
 
+import { canonicalRepoPath } from '../../src/domain/launch-task.js';
 import { paddedAt, paddedSeq } from '../../src/retrieval/projectors.js';
 import { appliesToPath } from '../../src/knowledge/policies.js';
 import { splitIdentifiers } from '../../src/domain/gate-clauses.js';
@@ -154,5 +155,40 @@ describe('code and policy prose do not share a vocabulary', () => {
     expect(splitIdentifiers('apiKey privateKey apiKey')).toBe(once);
     // Deduplicated: `apiKey` twice does not double the weight of "api".
     expect(once.split(' ').filter((word) => word === 'api')).toHaveLength(1);
+  });
+});
+
+describe('one repository, one row', () => {
+  /**
+   * The bug: the same checkout was registered twice on Windows.
+   *
+   * `repoOpen` stores git's toplevel (`C:/Users/...`, forward slashes) and `task create` stored
+   * Node's `path.resolve` (`C:\Users\...`, backslashes). `repo.path` is UNIQUE, but that
+   * compares strings — so both inserted, and everything keyed by repo split silently across
+   * two ids. A migration's targets could land under one and its code chunks under the other.
+   */
+  // Built with `join` rather than written as string literals: a literal backslash path in
+  // source is one missed escape away from `\r` becoming a carriage return, which is exactly the
+  // kind of silent wrongness this block is here to prevent.
+  const win = (...parts: string[]): string => parts.join('\\');
+
+  it('gives both Windows spellings the same key', () => {
+    expect(canonicalRepoPath(win('C:', 'Users', 'asus', 'repo'))).toBe('C:/Users/asus/repo');
+    expect(canonicalRepoPath('C:/Users/asus/repo')).toBe('C:/Users/asus/repo');
+  });
+
+  it('upper-cases the drive letter', () => {
+    // Windows hands out a lower- and an upper-case drive letter for the same volume.
+    expect(canonicalRepoPath(win('c:', 'Users', 'asus', 'repo'))).toBe('C:/Users/asus/repo');
+    expect(canonicalRepoPath('c:/Users/asus/repo')).toBe('C:/Users/asus/repo');
+  });
+
+  it('drops a trailing separator', () => {
+    expect(canonicalRepoPath('C:/Users/asus/repo/')).toBe('C:/Users/asus/repo');
+    expect(canonicalRepoPath(`${win('C:', 'Users', 'asus', 'repo')}\\`)).toBe('C:/Users/asus/repo');
+  });
+
+  it('leaves a POSIX path alone', () => {
+    expect(canonicalRepoPath('/home/asus/repo')).toBe('/home/asus/repo');
   });
 });
