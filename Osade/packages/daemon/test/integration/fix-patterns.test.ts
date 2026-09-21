@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { openDb, type Db } from '../../src/db/index.js';
+import { MigrationService } from '../../src/domain/migration.js';
 import { ContextAssembler } from '../../src/retrieval/assembler.js';
 import {
   FixPatterns,
@@ -168,6 +169,8 @@ describe('§M.5.8 — TypeScript diagnostics', () => {
     expect(found).toHaveLength(2);
     expect(found[0]).toMatchObject({ file: 'src/lib/wrap.ts', line: 12 });
     expect(found[1]).toMatchObject({ file: 'src/app/page.ts', line: 7 });
+    // The TS code is part of the recorded pattern: it names the failure class.
+    expect(found[0]!.message).toBe('TS2554: Expected 2 arguments, but got 1.');
   });
 
   it('reports nothing for a log with no diagnostics', () => {
@@ -280,8 +283,7 @@ describe('§M.5.5 — a passing required run publishes its fixes', () => {
   });
 });
 
-describe('§M.5.8 — a failing run records what discovery missed', () => {
-  async function failWithDiagnostic(logPath: string): Promise<void> {
+async function failWithDiagnostic(logPath: string): Promise<void> {
     seed();
     db.prepare(
       `INSERT INTO migration (id, provider, package, to_version, changelog_text, created_by, created_at)
@@ -301,15 +303,17 @@ describe('§M.5.8 — a failing run records what discovery missed', () => {
        VALUES ('cs1', 'm1', 'mc1', 'r1', 'src/a.ts', 2, 'direct', 'both')`,
     ).run();
     addVerifyRun('vr1', 't1', 2, 'head1', logPath);
-    await learner.learn({
-      runId: 'vr1',
-      taskId: 't1',
-      exitCode: 2,
-      required: true,
-      headSha: 'head1',
-      logPath,
-    });
-  }
+  await learner.learn({
+    runId: 'vr1',
+    taskId: 't1',
+    exitCode: 2,
+    required: true,
+    headSha: 'head1',
+    logPath,
+  });
+}
+
+describe('§M.5.8 — a failing run records what discovery missed', () => {
 
   it('records a diagnostic at a site discovery never proposed', async () => {
     const logPath = join(dir, 'fail.log');
@@ -415,5 +419,47 @@ describe('§M.2.2 — a verified fix reaches a sibling lane', () => {
     // the same thing five times is how it gets wasted.
     const fixes = result?.pack.items.filter((item) => item.src_table === 'fix_pattern') ?? [];
     expect(fixes).toHaveLength(1);
+  });
+});
+
+describe('§M.5.8 — a miss becomes a regression fixture', () => {
+  it('exports each miss as a file and records where it went', async () => {
+    const logPath = join(dir, 'fail.log');
+    writeFileSync(
+      logPath,
+      [
+        'src/lib/wrap.ts(12,18): error TS2554: Expected 2 arguments, but got 1.',
+        'src/app/page.ts(7,3): error TS2339: Property query does not exist.',
+      ].join('\n'),
+    );
+    await failWithDiagnostic(logPath);
+
+    const service = new MigrationService(db, { now: () => NOW, onWarning: () => {} });
+    expect(service.misses('m1')).toHaveLength(2);
+
+    const out = join(dir, 'fixtures');
+    const written = await service.exportMisses('m1', out);
+
+    expect(written).toHaveLength(2);
+    for (const path of written) {
+      const text = readFileSync(path, 'utf8');
+      // The fixture has to carry the site *and* the diagnostic that revealed it — recall
+      // improves from real failures, and a fixture without the failure is a guess.
+      expect(text).toContain('Discovery miss');
+      expect(text).toMatch(/- site: src\/(lib\/wrap|app\/page)\.ts:\d+/);
+      expect(text).toMatch(/TS\d+:/);
+    }
+
+    // The path is recorded, so a second export does not silently orphan the first.
+    const recorded = service.misses('m1').map((miss) => miss.fixture_path);
+    expect(recorded.every((path) => path != null)).toBe(true);
+  });
+
+  it('writes nothing when discovery missed nothing', async () => {
+    const service = new MigrationService(db, { now: () => NOW, onWarning: () => {} });
+    expect(await service.exportMisses('m1', join(dir, 'empty'))).toEqual([]);
+    // No directory is created for an empty export: an empty fixtures folder in a diff reads
+    // as "someone deleted the fixtures".
+    expect(existsSync(join(dir, 'empty'))).toBe(false);
   });
 });

@@ -93,11 +93,13 @@ export async function defaultHeadlessExec(opts: {
     let out = '';
     let err = '';
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    // `timer` is declared below, after the stream handlers, and closed over here. `finish` is
+    // only ever *called* asynchronously — from the timeout, an event handler, or the write
+    // catch — all of which run after the declaration has executed.
     const finish = (fn: () => void): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       fn();
     };
     child.stdout.on('data', (chunk: Buffer) => {
@@ -106,7 +108,7 @@ export async function defaultHeadlessExec(opts: {
     child.stderr.on('data', (chunk: Buffer) => {
       err += chunk.toString('utf8');
     });
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill();
       finish(() => reject(new Error(`headless run timed out after ${opts.timeoutMs}ms`)));
     }, opts.timeoutMs);

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -388,10 +388,34 @@ describe('osade . — opening a repository', () => {
 
   it('resolves a subdirectory to the repository root', async () => {
     // `osade .` is typed from wherever you are standing, which is usually not the root.
-    const root = resolve(join(import.meta.dirname, '..', '..', '..'));
-    const result = await trpc('repoOpen', { path: join(root, 'docs') });
+    //
+    // Built here rather than pointed at this workspace: the checkout Osade ships from is not
+    // always the git root (it is nested inside another repository in some layouts), so a test
+    // that assumed `<workspace>/docs` existed was really asserting one person's directory
+    // arrangement. A throwaway repo asserts the behaviour instead.
+    const repo = mkdtempSync(join(tmpdir(), 'osade-subdir-'));
+    const sh = (args: string[]): void => {
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true });
+    };
+    try {
+      sh(['init', '-q', '-b', 'main']);
+      mkdirSync(join(repo, 'packages', 'deep'), { recursive: true });
+      writeFileSync(join(repo, 'packages', 'deep', 'file.txt'), 'x\n');
+      sh(['add', '-A']);
+      sh(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']);
 
-    expect(slashes((result as { path: string }).path)).toBe(slashes(root));
+      const result = await trpc('repoOpen', { path: join(repo, 'packages', 'deep') });
+
+      // `realpath` because macOS hands out /var paths that resolve to /private/var.
+      const expected = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: repo,
+        encoding: 'utf8',
+        windowsHide: true,
+      }).trim();
+      expect(slashes((result as { path: string }).path)).toBe(slashes(expected));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it('reports the checkout HEAD as currentBranch, not origin/HEAD', async () => {

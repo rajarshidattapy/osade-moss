@@ -270,7 +270,7 @@ export interface TsDiagnostic {
 export function parseTsDiagnostics(log: string): TsDiagnostic[] {
   const out: TsDiagnostic[] = [];
   const seen = new Set<string>();
-  const pattern = /^(?:\s*)([^\s(][^(]*?)[:(](\d+)[,:](\d+)\)?:?\s+-?\s*error\s+TS\d+:\s*(.+)$/gm;
+  const pattern = /^(?:\s*)([^\s(][^(]*?)[:(](\d+)[,:](\d+)\)?:?\s+-?\s*error\s+(TS\d+):\s*(.+)$/gm;
 
   for (const match of log.matchAll(pattern)) {
     const file = match[1]!.trim().replace(/\\/g, '/');
@@ -279,7 +279,10 @@ export function parseTsDiagnostics(log: string): TsDiagnostic[] {
     const key = `${file}\u0000${line}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ file, line, message: match[4]!.trim() });
+    // The code travels with the message. A fixture that says only "Expected 2 arguments"
+    // loses which failure class it is, and TS2554 vs TS2339 is the difference between a
+    // signature change and a rename.
+    out.push({ file, line, message: `${match[4]!}: ${match[5]!.trim()}` });
   }
   return out;
 }

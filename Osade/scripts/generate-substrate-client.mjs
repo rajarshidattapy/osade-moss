@@ -72,12 +72,6 @@ function findPin() {
 const PROVENANCE_COMMENT =
   /^ \* This interface was referenced by `[^`]*`'s JSON-Schema\n \* via the `definition` "[^"]*"\.\n/gm;
 
-/** The upstream project's name: the last segment of the repository the pin records. */
-function projectName(pin) {
-  const segments = new URL(pin.license.upstream_repository).pathname.split('/').filter(Boolean);
-  return segments[segments.length - 1];
-}
-
 /**
  * The prefix of the runtime's own environment variables, as the pin records it.
  *

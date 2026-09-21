@@ -1,51 +1,62 @@
-Moss JavaScript SDK
-Source for the @moss-dev/moss JavaScript package.
+# The Moss SDK, as Osade uses it
 
-Architecture
-                    ┌──────────────────────────────────┐
-                    │      Your application code       │
-                    └──────────────┬───────────────────┘
-                                   │
-                    ┌──────────────▼───────────────────┐
-                    │  @moss-dev/moss  (TypeScript)     │  ← sdk/
-                    │  MossClient — async API for      │
-                    │  indexing, querying, management   │
-                    └──────────────┬───────────────────┘
-                                   │
-                    ┌──────────────▼───────────────────┐
-                    │  @moss-dev/moss-core  (Rust/NAPI) │  ← bindings/
-                    │  Index, IndexManager,             │
-                    │  ManageClient, data models        │
-                    └──────────────────────────────────┘
-Directory	Package	Description
-sdk/	@moss-dev/moss	TypeScript SDK. Fully open-source — install, build, modify, contribute.
-bindings/	@moss-dev/moss-core	Native Rust/NAPI-RS bindings for the Moss engine. Source available for reference and debugging. Pre-built binaries on npm. Feature requests and bugs → open an issue.
-Quick start
-npm install @moss-dev/moss
-import { MossClient } from "@moss-dev/moss";
+The package is **`@moss-js/moss`** (1.11.0 at the time of writing). `@moss-dev/moss` is the
+frozen 1.7.1 predecessor and is *not* what Osade builds against — an earlier version of this
+file documented that package and its `createIndex` / `loadIndex` API, which no longer matches
+anything in the tree.
 
-const client = new MossClient("your_project_id", "your_project_key");
+For the full reference see [`docs-moss.md`](./docs-moss.md) or
+<https://docs.moss.dev/docs/reference/js/api>. This file records only what Osade depends on and
+what was verified by probing the installed package, because two of those facts contradict the
+published docs.
 
-await client.createIndex("support-docs", [
-    { id: "1", text: "Refunds are processed within 3-5 business days." },
-    { id: "2", text: "You can track your order on the dashboard." },
-]);
+## What Osade uses
 
-await client.loadIndex("support-docs");
-const results = await client.query("support-docs", "how long do refunds take?", { topK: 3 });
+One session per namespace, all local:
 
-for (const doc of results.docs) {
-    console.log(`[${doc.score.toFixed(3)}] ${doc.text}`);
-}
-See sdk/README.md for the full API reference.
+```ts
+const client = new MossClient(projectId, projectKey);
+const session = await client.session('osade.<installId>.turns', 'moss-minilm');
 
-Contributing
-SDK (sdk/) — open for contributions:
+await session.addDocs(docs, { upsert: true });
+await session.deleteDocs(ids);
+const { docs: hits } = await session.query(text, { topK, alpha, filter });
+```
 
-cd sdk
-npm install
-npm test
-Bindings (bindings/) — source is published for reference. To request changes or report bugs, open an issue.
+Every one of those runs in process memory with no cloud round trip. `pushIndex()` exists and
+Osade **never calls it** unless `retrieval.cloudSync` is set — transcripts, code chunks and
+policy text do not leave the machine by default (OSADE-MOSS §M.1.3).
 
-License
-BSD 2-Clause License
+## Two things the published docs get wrong
+
+**`saveToDisk` and `loadFromDisk` exist.** The Sessions page does not mention them, which led to
+an early decision here to rebuild the index from SQLite on every boot. Probing
+`SessionIndex.prototype` shows both, each taking a directory path. Osade uses them for the
+§M.1.3 warm boot, with a cursor stamped beside the snapshot so a stale index can never be
+mistaken for a current one.
+
+**The metadata filter is not the flat MongoDB shape.** A condition is
+`{ field, condition: { $eq } }`; a single condition is passed bare, and several are composed
+under `$and`. The operators are `$eq $ne $gt $gte $lt $lte $in $nin $near`. Osade translates its
+own narrower filter type in `retrieval/moss-adapter.ts` and nowhere else.
+
+## Facts that shape the design
+
+- **Metadata values are strings.** Whether comparisons are numeric or lexical is left open by
+  the docs (§M.12 Q3), so Osade zero-pads every sortable key to twelve digits — `seq` and `at`
+  — which makes both answers correct.
+- **`alpha` blends semantic and keyword scoring**: 1.0 pure semantic, 0.0 pure keyword, 0.8 the
+  default. Osade sets it per namespace (§M.1.6); `code` uses 0.5 because identifiers carry half
+  the signal.
+- **Credentials are validated when a session is opened**, which is why Osade opens all five at
+  boot rather than on the first agent turn — that turn is on the hot path.
+- **The free Developer plan allows 3 cloud indexes per project.** Un-pushed sessions are local,
+  and whether they count against that limit is unverified (§M.12 Q1). If they do, the adapter
+  collapses to one session with a mandatory `ns` filter; the port does not change.
+
+## The seam
+
+`@moss-js/moss` may be imported only under `packages/daemon/src/retrieval/**`, and in practice
+only by `moss-adapter.ts`. That is lint-enforced and covered by `lint-rules.test.ts`. The
+adapter loads the SDK through a dynamic import so a missing package or an unbuildable native
+addon degrades to SQLite FTS5 rather than failing daemon startup (§M.10).

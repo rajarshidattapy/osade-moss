@@ -2,7 +2,8 @@
  * Numbered, forward-only migrations, applied at daemon boot — OSADE.md §5.
  *
  * Two rules that are enforced by tests rather than by review:
- *   - No `status` column, in any table, ever (§6). `test/integration/db.test.ts` asserts it.
+ *   - No `status` column, in any table, ever (§6). `test/integration/cdc.test.ts` asserts it
+ *     mechanically, by reading `PRAGMA table_info` for every table in the schema.
  *   - Every fact table gets AFTER INSERT/UPDATE/DELETE triggers writing to `change_log` (§5.4).
  *     One event path; no service emits a websocket message directly.
  */

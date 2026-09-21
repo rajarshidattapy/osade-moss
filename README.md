@@ -67,14 +67,18 @@ You need **Node.js 22+**, **pnpm** (`corepack enable`), **git**, and at least on
 `PATH`.
 
 ```bash
-git clone https://github.com/OsadeOSS/Osade.git
-cd Osade
+git clone https://github.com/rajarshidattapy/osade-moss.git
+cd osade-moss/Osade
 pnpm install
 node scripts/fetch-substrate-binaries.mjs
 pnpm --filter @osade/desktop start
 ```
 
 The window opens. Open a folder, type something, press Enter.
+
+**The layout**: the pnpm workspace is `Osade/`, and the specs are `docs/` at the repository
+root. Every command in this file runs from `Osade/`; every link points at the root. That split
+is why the clone above has two path segments rather than one.
 
 To put `osade` on your PATH (Windows and POSIX):
 
@@ -160,9 +164,10 @@ Early and moving fast. Usable, not stable. The Moss features are under active de
 
 | | |
 | --- | --- |
-| [docs/osade/architechture.md](docs/osade/architechture.md) | How it's built: processes, boundaries, invariants |
+| [docs/osade/architecture.md](docs/osade/architecture.md) | How it's built: processes, boundaries, invariants |
 | [docs/osade/OSADE.md](docs/osade/OSADE.md) | Full spec: data model, invariants, milestones |
 | [docs/osadexmoss.md](docs/osadexmoss.md) | Moss features spec: retrieval layer, multiplayer, attestation, compliance |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the invariants, the seams, and how to add an agent |
 
 ## Contributing
 
@@ -172,4 +177,4 @@ no orchestration changes. Behaviour branches on declared capabilities (`plan-mod
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).
