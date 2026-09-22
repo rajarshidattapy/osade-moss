@@ -11,6 +11,7 @@ import type {
   MigrationArm,
   MigrationChange,
   MigrationMetrics,
+  MigrationSummary,
   MigrationView,
 } from '@osade/contract';
 
@@ -537,6 +538,21 @@ export class MigrationService {
   }
 
   // ── the view (§M.5.5) ───────────────────────────────────────────────────────
+
+  /** Newest first. Counts are read, never stored, so a list cannot disagree with a view. */
+  list(): MigrationSummary[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT m.id, m.provider, m.package, m.from_version, m.to_version, m.created_at,
+                m.changes_confirmed_at,
+                (SELECT COUNT(*) FROM migration_change c WHERE c.migration_id = m.id) AS changes,
+                (SELECT COUNT(*) FROM migration_target t WHERE t.migration_id = m.id) AS targets
+           FROM migration m
+          ORDER BY m.created_at DESC, m.id`,
+      )
+      .all() as MigrationSummary[];
+    return rows;
+  }
 
   view(migrationId: string): MigrationView | null {
     const migration = this.#db

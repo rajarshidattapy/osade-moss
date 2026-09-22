@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { openDb } from '../src/db/index.js';
+import { reloadPolicies } from '../src/knowledge/policies.js';
 
 /**
  * Seed a smoke database with one task that reaches every panel.
@@ -105,10 +106,58 @@ try {
      VALUES ('mr_smoke', 'r_smoke', ?, ?, 1290, 41, 6)`,
   ).run(NOW - 60_000, NOW - 30_000);
 
+  // §M.2.4 — the pack behind the lane's latest turn, citing the active convention.
+  db.prepare(
+    `INSERT OR REPLACE INTO context_pack
+       (id, task_id, chat_turn_id, arm, backend, retrieval_ms, assembly_ms, tokens_used, overflow,
+        degraded, items_json, created_at)
+     VALUES ('cp_smoke01', 't_smoke01', NULL, NULL, 'fts5', 3.4, 0.6, 212, 0, 0, ?, ?)`,
+  ).run(
+    JSON.stringify([
+      { id: 'conventions:convention:cv_smoke01', ns: 'conventions', score: 0.92, src_table: 'convention', src_id: 'cv_smoke01' },
+    ]),
+    NOW,
+  );
+
   db.exec('COMMIT');
 } catch (error) {
   db.exec('ROLLBACK');
   throw error;
 }
+
+// §M.8.3 — a real policy file, loaded the way the daemon loads it, so the reload at boot finds
+// the same hash and leaves it alone. One clause holds the approve button; one is only shown.
+const policyDir = join(home, 'policies');
+mkdirSync(policyDir, { recursive: true });
+writeFileSync(
+  join(policyDir, 'security.md'),
+  [
+    '---',
+    'title: Security',
+    '---',
+    '',
+    '## SEC-3.2 Retries must be bounded',
+    'requires_ack: true',
+    '',
+    'Any retry loop must have a fixed upper bound and back off between attempts.',
+    '',
+    '## SEC-1.1 No secrets in tests',
+    '',
+    'Test fixtures must not contain real credentials or API keys.',
+    '',
+  ].join('\n'),
+);
+reloadPolicies(db, { env: { ...process.env, OSADE_HOME: home } });
+
+// Bound to the gate the way `GateClauses.record` binds it: copied from the clause (M18).
+db.prepare(
+  `INSERT OR REPLACE INTO gate_clause
+     (gate_id, hunk_ref, clause_id, clause_ref, title, text, scope, policy_path, file_sha,
+      requires_ack, score)
+   SELECT 'g_smoke01', 'src/poller.test.ts:42', pc.id, pc.clause_ref, pc.title, pc.text, p.scope,
+          p.path, p.file_sha, pc.requires_ack, CASE pc.requires_ack WHEN 1 THEN 0.81 ELSE 0.44 END
+     FROM policy_clause pc JOIN policy p ON p.id = pc.policy_id
+    WHERE p.scope = 'global'`,
+).run();
 
 process.stdout.write(`seeded ${join(home, 'osade.db')} with t_smoke01\n`);

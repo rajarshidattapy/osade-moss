@@ -105,7 +105,7 @@ export function GitHubSignIn({
         </button>
       )}
       {onSkip && (
-        <button disabled={busy} onClick={onSkip} style={{ marginLeft: 8 }}>
+        <button data-github-skip disabled={busy} onClick={onSkip} style={{ marginLeft: 8 }}>
           Not now
         </button>
       )}

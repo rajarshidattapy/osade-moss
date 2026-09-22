@@ -17,6 +17,7 @@ declare global {
   interface Window {
     osade?: {
       daemonPort(): Promise<number | null>;
+      daemonToken?(): Promise<string | null>;
       log(message: string): void;
       openInSubstrate(): Promise<{ command: string; hint: string }>;
       openedRepo(): Promise<string | null>;
@@ -69,7 +70,9 @@ export function useLedger(): Ledger {
         return;
       }
 
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const token = (await window.osade?.daemonToken?.()) ?? null;
+      const query = token ? `?token=${encodeURIComponent(token)}` : '';
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws${query}`);
       socketRef.current = socket;
 
       socket.onopen = () => {

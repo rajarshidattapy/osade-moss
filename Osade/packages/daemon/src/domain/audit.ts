@@ -152,10 +152,10 @@ function verificationFor(
 function clausesFor(db: Db, gateId: string): { ref: string; policy: string; file_sha: string }[] {
   const rows = db
     .prepare(
-      `SELECT pc.clause_ref, p.path, p.file_sha FROM gate_clause gc
-         JOIN policy_clause pc ON pc.id = gc.clause_id
-         JOIN policy p ON p.id = pc.policy_id
-        WHERE gc.gate_id = ? ORDER BY pc.clause_ref`,
+      // M18 — read from the snapshot, never joined to `policy`: the current policy is not the
+      // one that was shown, and a deleted one would drop the row entirely.
+      `SELECT clause_ref, policy_path AS path, file_sha FROM gate_clause
+        WHERE gate_id = ? ORDER BY clause_ref`,
     )
     .all(gateId) as { clause_ref: string; path: string; file_sha: string }[];
   // The file_sha travels with the ref: "SEC-3.2 applied" is only checkable against the version
@@ -166,9 +166,8 @@ function clausesFor(db: Db, gateId: string): { ref: string; policy: string; file
 function acksFor(db: Db, gateId: string): { ref: string; by: string; at: string }[] {
   const rows = db
     .prepare(
-      `SELECT pc.clause_ref, gc.acked_by, gc.acked_at FROM gate_clause gc
-         JOIN policy_clause pc ON pc.id = gc.clause_id
-        WHERE gc.gate_id = ? AND gc.acked_at IS NOT NULL ORDER BY pc.clause_ref`,
+      `SELECT clause_ref, acked_by, acked_at FROM gate_clause
+        WHERE gate_id = ? AND acked_at IS NOT NULL ORDER BY clause_ref`,
     )
     .all(gateId) as { clause_ref: string; acked_by: string; acked_at: number }[];
   return rows.map((row) => ({

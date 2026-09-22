@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { openDb, type Db } from '../../src/db/index.js';
 import { GateClauses } from '../../src/domain/gate-clauses.js';
+import { auditExport } from '../../src/domain/audit.js';
 import { GateError, Gates } from '../../src/domain/gates.js';
 import { appliesToPath, parsePolicy, reloadPolicies } from '../../src/knowledge/policies.js';
 import { Fts5Adapter } from '../../src/retrieval/fts5-adapter.js';
@@ -388,5 +389,80 @@ describe('§M.8.5 criterion 2 — editing the policy voids the approval', () => 
 
     reloadPolicies(db, {});
     await expect(gates.assertExecutableNow(gateId, payload)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The bug: `gate_clause` cascaded from `policy_clause`, and the daemon reloads policies at every
+ * boot. Editing or deleting a policy file therefore erased "clauses shown" and "clauses acked"
+ * from the audit export of gates decided long before — a named person's approval, reported as
+ * if no policy had been in front of them.
+ */
+describe('§M.8.4 — a policy reload never rewrites the audit trail (M18)', () => {
+  async function executedGate(): Promise<string> {
+    writePolicy(SECURITY_POLICY);
+    reloadPolicies(db, {});
+    await retrieval.indexer.drain();
+    const set = await clauses.forDiff('r1', SECRET_DIFF);
+    expect(set.matches.length).toBeGreaterThan(0);
+    const payload = { title: 'Add config', head_sha: 'a1c0ffee' };
+    const gateId = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
+    clauses.record(gateId, set);
+    const clause = db
+      .prepare("SELECT id FROM policy_clause WHERE clause_ref = 'SEC-3.2'")
+      .get() as { id: string };
+    clauses.ack(gateId, clause.id, 'priya', NOW);
+    gates.decide(gateId, 'approve');
+    gates.markExecuted(gateId);
+    return gateId;
+  }
+
+  function auditFor(gateId: string) {
+    return auditExport(db, { since: 0 }).find((row) => row.gate_id === gateId)!;
+  }
+
+  it('keeps what an executed gate showed after the policy is edited', async () => {
+    const gateId = await executedGate();
+    const before = auditFor(gateId);
+    expect(before.clauses_shown.map((c) => c.ref)).toContain('SEC-3.2');
+
+    writePolicy(SECURITY_POLICY.replace('No credential,', 'No credential or secret,'));
+    reloadPolicies(db, {});
+
+    const after = auditFor(gateId);
+    expect(after.clauses_shown).toEqual(before.clauses_shown);
+    expect(after.clauses_acked).toEqual(before.clauses_acked);
+    // The hash is the one that was shown, not the file as it is now.
+    expect(after.clauses_shown[0]!.file_sha).toBe(before.clauses_shown[0]!.file_sha);
+  });
+
+  it('keeps it after the policy file is deleted outright', async () => {
+    const gateId = await executedGate();
+    const before = auditFor(gateId);
+
+    rmSync(join(repoPath, '.osade', 'policies', 'security.md'));
+    const result = reloadPolicies(db, {});
+    expect(result.removed).toBe(1);
+
+    expect(auditFor(gateId).clauses_acked).toEqual(before.clauses_acked);
+    expect(auditFor(gateId).clauses_acked[0]!.by).toBe('priya');
+  });
+
+  it('still unbinds a gate that has not executed, without forgetting it was shown', async () => {
+    writePolicy(SECURITY_POLICY);
+    reloadPolicies(db, {});
+    await retrieval.indexer.drain();
+    const set = await clauses.forDiff('r1', SECRET_DIFF);
+    const payload = { title: 'Add config', head_sha: 'a1c0ffee' };
+    const gateId = gates.request({ taskId: 't1', gate: 'gate.pr_open', payload, clauses: set });
+    clauses.record(gateId, set);
+
+    writePolicy(SECURITY_POLICY.replace('No credential,', 'No credential or secret,'));
+    reloadPolicies(db, {});
+
+    // Nothing live binds it any more, so no stale ack is demanded of the approver…
+    expect(clauses.outstandingAcks(gateId)).toBe(0);
+    // …but the audit still says what was on the card.
+    expect(auditFor(gateId).clauses_shown.map((c) => c.ref)).toContain('SEC-3.2');
   });
 });

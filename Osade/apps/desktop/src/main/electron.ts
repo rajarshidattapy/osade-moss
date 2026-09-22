@@ -38,7 +38,7 @@ import {
   tokenFromGh,
 } from './oauth.js';
 import { githubToken, setGithubToken } from './secrets.js';
-import { adoptOrSpawnDaemon, stopDaemon } from './supervisor/daemon.js';
+import { adoptOrSpawnDaemon, readHostToken, stopDaemon } from './supervisor/daemon.js';
 import {
   clampZoomLevel,
   levelFromFactor,
@@ -331,9 +331,13 @@ async function runSmokeShot(target: BrowserWindow): Promise<void> {
 
     // `OSADE_SMOKE_CLICK` opens something before the photograph. The detail panels — gates, the
     // verification plan, the PR flow, conventions — are only reachable by selecting a row, so
-    // without this the only thing a smoke run can ever see is the ledger.
-    const clickSelector = process.env.OSADE_SMOKE_CLICK;
-    if (clickSelector) {
+    // without this the only thing a smoke run can ever see is the ledger. `a >> b` clicks in
+    // sequence, for anything behind a first screen (the welcome, then the workspace panel).
+    const clickSteps = (process.env.OSADE_SMOKE_CLICK ?? '')
+      .split('>>')
+      .map((step) => step.trim())
+      .filter(Boolean);
+    for (const clickSelector of clickSteps) {
       const clicked = await target.webContents.executeJavaScript(
         `(() => { const el = document.querySelector(${JSON.stringify(clickSelector)});
                   if (!el) return false; el.click(); return true; })()`,
@@ -443,6 +447,7 @@ async function runSmokeShot(target: BrowserWindow): Promise<void> {
 }
 
 ipcMain.handle('osade:daemon-port', () => daemonPort);
+ipcMain.handle('osade:daemon-token', () => (daemonPort == null ? null : readHostToken()));
 ipcMain.on('osade:log', (_event, message: unknown) => {
   if (typeof message === 'string' && message.length > 0) say(message);
 });

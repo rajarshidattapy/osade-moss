@@ -25,6 +25,7 @@ import {
   type ChatGroup,
 } from './lanes.js';
 import { lanePrompt, parseMentions } from './mentions.js';
+import { MossPanel, retrievalBadge, useRetrievalStats, type RepoChoice } from './MossPanel.js';
 import { RepoSettings, useAgentCatalog } from './RepoSettings.js';
 import { STATUS, TONE_COLOUR, ago, summarise } from './status.js';
 import { titleFrom } from './title.js';
@@ -103,6 +104,18 @@ export function App(): JSX.Element {
   const working = chats.filter((t) => t.status === 'implementing' || t.status === 'verifying');
 
   const byRepo = useMemo(() => groupByRepo(chats), [chats]);
+  const [mossOpen, setMossOpen] = useState(false);
+  const retrieval = useRetrievalStats();
+  // Every repository the daemon has shown us, not only the open one: a migration spans repos.
+  const knownRepos = useMemo<RepoChoice[]>(() => {
+    const seen = new Map<string, RepoChoice>();
+    if (repo) seen.set(repo.repoId, { id: repo.repoId, label: repoLabel(repo.repoId, repo, null, aliases) });
+    for (const t of allTasks) {
+      if (seen.has(t.task.repo_id)) continue;
+      seen.set(t.task.repo_id, { id: t.task.repo_id, label: repoLabel(t.task.repo_id, repo, t.cwd, aliases) });
+    }
+    return [...seen.values()];
+  }, [allTasks, repo, aliases]);
   const flat = useMemo(() => byRepo.flatMap((g) => g.chats), [byRepo]);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
@@ -855,7 +868,10 @@ export function App(): JSX.Element {
           connected={connection === 'live'}
           github={github.status}
           onGithubSignedIn={(login) => github.setStatus({ signedIn: true, login })}
+          retrieval={retrievalBadge(retrieval)}
+          onOpenWorkspace={() => setMossOpen(true)}
         />
+        {mossOpen && <MossPanel repos={knownRepos} onClose={() => setMossOpen(false)} />}
       </main>
 
       {showDetail && (
@@ -1458,12 +1474,16 @@ function SidebarFoot({
   connected,
   github,
   onGithubSignedIn,
+  retrieval,
+  onOpenWorkspace,
 }: {
   working: number;
   total: number;
   connected: boolean;
   github: { signedIn: boolean; login: string | null };
   onGithubSignedIn: (login: string) => void;
+  retrieval: { value: string; tone: string };
+  onOpenWorkspace: () => void;
 }): JSX.Element {
   return (
     <div
@@ -1481,6 +1501,25 @@ function SidebarFoot({
         value={connected ? 'Connected' : 'Reconnecting'}
         tone={connected ? 'var(--st-live)' : 'var(--st-fail)'}
       />
+      <button
+        type="button"
+        data-open-workspace
+        onClick={onOpenWorkspace}
+        title="Retrieval, migrations, team, pull requests, policies and audit"
+        style={{
+          display: 'block',
+          width: '100%',
+          background: 'transparent',
+          border: 'none',
+          borderRadius: 0,
+          padding: 0,
+          textAlign: 'left',
+          cursor: 'pointer',
+        }}
+      >
+        <FootRow label="Retrieval" value={retrieval.value} tone={retrieval.tone} />
+        <FootRow label="Workspace" value="Migrations · Team · PRs ›" />
+      </button>
       {github.signedIn ? (
         <FootRow label="GitHub" value={github.login ?? 'Signed in'} />
       ) : (

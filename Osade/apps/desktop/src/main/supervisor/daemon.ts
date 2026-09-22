@@ -57,6 +57,18 @@ function readPort(): number | null {
   }
 }
 
+/**
+ * §M.6.2 — the host token, read fresh on every ask: the daemon mints a new one each boot, and a
+ * restart under a running window must not leave the window holding a dead token.
+ */
+export function readHostToken(): string | null {
+  try {
+    return readFileSync(join(osadeRoot(), 'daemon.token'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function pidFile(): string {
   return join(osadeRoot(), 'daemon.pid');
 }

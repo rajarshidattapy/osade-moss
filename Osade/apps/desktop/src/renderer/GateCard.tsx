@@ -4,6 +4,7 @@ import type { GateRequest, TaskView } from '@osade/contract';
 
 import { api } from './api.js';
 import { chord } from './chords.js';
+import { GateClauses, useGateClauses } from './GateClauses.js';
 
 /**
  * The gate card — OSADE.md §14.2.
@@ -41,6 +42,9 @@ export function GateCard({
   const [draft, setDraft] = useState(() => pretty(gate.payload_json));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const clauses = useGateClauses(gate.id);
+  // §M.8.3 — only a `requires_ack` clause a human wrote can hold this. The daemon refuses too.
+  const ackBlocks = clauses.view != null && !clauses.view.approvable;
 
   const isPublic = PUBLIC_WRITES.has(gate.gate);
   // §10.2 — verification is required before gate.pr_open can be approved. Surfaced rather
@@ -109,6 +113,8 @@ export function GateCard({
         <Payload json={gate.payload_json} />
       )}
 
+      {clauses.view && <GateClauses view={clauses.view} onChange={clauses.setView} />}
+
       {error && (
         <p style={{ color: 'var(--st-fail)', fontSize: 'var(--t-xs)' }} className="mono">
           {error}
@@ -120,7 +126,7 @@ export function GateCard({
           <>
             <button
               className="primary"
-              disabled={busy}
+              disabled={busy || ackBlocks}
               onClick={() => void run(() => api.gateEditAndApprove(gate.id, parse(draft)))}
             >
               Approve edited
@@ -134,7 +140,8 @@ export function GateCard({
             {/* §19.4 — an action keeps its name through the whole flow. */}
             <button
               className="primary"
-              disabled={busy}
+              disabled={busy || ackBlocks}
+              title={ackBlocks ? 'Acknowledge the policy clauses above first' : undefined}
               onClick={() => void run(() => api.gateDecide(gate.id, 'approve'))}
             >
               {approveLabel(gate.gate)} <kbd>{chord('enter')}</kbd>

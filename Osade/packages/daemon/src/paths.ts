@@ -35,6 +35,14 @@ export interface OsadePaths {
   readonly electronUserData: string;
   /** Where the daemon writes its port so the CLI and the Electron app can find it. */
   readonly portFile: string;
+  /**
+   * OSADE-MOSS §M.6.2 — the host's bearer token, minted fresh at every boot.
+   *
+   * Once teammates exist an anonymous caller is refused, including the owner's own window and
+   * CLI. Reading this file is how they prove they run as the user who owns `~/.osade` — the
+   * same proof the pre-F2 loopback model relied on, made explicit rather than assumed.
+   */
+  readonly tokenFile: string;
   readonly pidFile: string;
 }
 
@@ -53,6 +61,7 @@ export function osadePaths(env: NodeJS.ProcessEnv = process.env): OsadePaths {
     mossDir: join(root, 'moss'),
     electronUserData: join(root, 'electron'),
     portFile: join(root, 'daemon.port'),
+    tokenFile: join(root, 'daemon.token'),
     pidFile: join(root, 'daemon.pid'),
   };
 }

@@ -100,6 +100,20 @@ export const MigrationTargetView = z.object({
 });
 export type MigrationTargetView = z.infer<typeof MigrationTargetView>;
 
+/** One row of the migrations list — enough to pick one, and to see how far it got. */
+export const MigrationSummary = z.object({
+  id: z.string(),
+  provider: z.string(),
+  package: z.string(),
+  from_version: z.string().nullable(),
+  to_version: z.string(),
+  created_at: Timestamp,
+  changes_confirmed_at: Timestamp.nullable(),
+  changes: z.number().int(),
+  targets: z.number().int(),
+});
+export type MigrationSummary = z.infer<typeof MigrationSummary>;
+
 export const MigrationView = z.object({
   id: z.string(),
   provider: z.string(),

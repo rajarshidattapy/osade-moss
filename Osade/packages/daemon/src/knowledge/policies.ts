@@ -178,8 +178,9 @@ export function reloadPolicies(
       const policyId = existing?.id ?? `pol_${randomUUID().slice(0, 8)}`;
       db.transaction(() => {
         if (existing) {
-          // Cascades the old clauses away, which is what makes an approval bound to them fail
-          // its re-hash rather than silently pointing at rewritten text.
+          // Cascades the old clauses away. Unexecuted gates citing them are unbound below, which
+          // is what makes an approval bound to them fail its re-hash rather than silently
+          // pointing at rewritten text. Every gate keeps its snapshot of what it showed (M18).
           db.prepare('DELETE FROM policy WHERE id = ?').run(existing.id);
         }
         db.prepare(
@@ -223,7 +224,30 @@ export function reloadPolicies(
     removed += 1;
   }
 
+  unbindStaleClauses(db, now);
   return { policies, clauses, removed };
+}
+
+/**
+ * A gate that has not executed stops being bound to a clause that no longer exists.
+ *
+ * Before M18 the foreign key deleted these rows outright, for every gate, and that was the bug:
+ * the audit trail of an approval made last month depended on nobody having edited the policy
+ * file since. What was worth keeping is the effect on a gate still in flight — approved or not,
+ * it must not execute against text the repository has since rewritten. Marking the row changes
+ * the gate's clause hash, so `assertExecutableNow` refuses it exactly as before; the row itself
+ * stays, because "these clauses were shown" is still true.
+ *
+ * Executed and denied gates are finished: nothing about them is re-checked, so nothing changes.
+ */
+function unbindStaleClauses(db: Db, now: number): void {
+  db.prepare(
+    `UPDATE gate_clause SET unbound_at = ?
+      WHERE unbound_at IS NULL
+        AND clause_id NOT IN (SELECT id FROM policy_clause)
+        AND gate_id IN (SELECT id FROM gate_request
+                         WHERE executed_at IS NULL AND (decision IS NULL OR decision = 'approve'))`,
+  ).run(now);
 }
 
 /**

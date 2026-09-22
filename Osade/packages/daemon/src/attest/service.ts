@@ -229,9 +229,8 @@ export class Attestations {
 
     const clauses = this.#db
       .prepare(
-        `SELECT pc.clause_ref, gc.acked_at FROM gate_clause gc
-           JOIN policy_clause pc ON pc.id = gc.clause_id
-          WHERE gc.gate_id = ? ORDER BY pc.clause_ref`,
+        `SELECT clause_ref, acked_at FROM gate_clause
+          WHERE gate_id = ? ORDER BY clause_ref`,
       )
       .all(gateId) as { clause_ref: string; acked_at: number | null }[];
 

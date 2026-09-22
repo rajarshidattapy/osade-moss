@@ -921,6 +921,62 @@ CREATE TABLE task_claim (               -- CDC table; row_id = task_id
 ALTER TABLE chat_turn ADD COLUMN author TEXT;
 `;
 
+/**
+ * M18 — a gate keeps the clauses it was shown (OSADE-MOSS §M.8.4).
+ *
+ * The bug: `gate_clause.clause_id` cascaded from `policy_clause`, and a policy reload replaces
+ * a changed file's clauses by deleting its `policy` row. The daemon reloads at every boot, so
+ * editing a policy file — or deleting one — silently erased "clauses shown" and "clauses
+ * acknowledged" from every gate that had ever cited it, *including decided ones*. The audit
+ * export then reported that a named person approved with no policy in front of them.
+ *
+ * The fix is to record the citation as it was shown: ref, title, text, the policy file and its
+ * hash, and whether it required an ack. C1 still holds — a row can only be written by copying
+ * a real clause (see `GateClauses.record`) — but it no longer depends on that clause still
+ * existing. `clause_id` stays, unconstrained, so a pending gate can be matched against the
+ * current clause set on reload.
+ *
+ * `unbound_at` is when the cited clause stopped existing while the gate had not yet executed.
+ * An unbound row leaves the gate's clause hash, so an approval made against the old text fails
+ * its re-hash (§M.8.5 criterion 2) — but the row stays, because the approver *did* see it.
+ * It is a timestamp, not a status: the gate's state is still derived (§6).
+ *
+ * `gate_clause` is a leaf, so the rebuild is safe: nothing references it, and dropping a child
+ * table never cascades.
+ */
+const M018_GATE_CLAUSE_SNAPSHOT = `
+CREATE TABLE gate_clause_m18 (
+  gate_id TEXT NOT NULL REFERENCES gate_request(id) ON DELETE CASCADE,
+  hunk_ref TEXT NOT NULL,
+  clause_id TEXT NOT NULL,
+  clause_ref TEXT NOT NULL,
+  title TEXT NOT NULL,
+  text TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  policy_path TEXT NOT NULL,
+  file_sha TEXT NOT NULL,
+  requires_ack INTEGER NOT NULL,
+  score REAL NOT NULL,
+  acked_by TEXT,
+  acked_at INTEGER,
+  unbound_at INTEGER,
+  PRIMARY KEY (gate_id, hunk_ref, clause_id)
+);
+
+INSERT INTO gate_clause_m18
+  (gate_id, hunk_ref, clause_id, clause_ref, title, text, scope, policy_path, file_sha,
+   requires_ack, score, acked_by, acked_at)
+SELECT gc.gate_id, gc.hunk_ref, gc.clause_id, pc.clause_ref, pc.title, pc.text, p.scope, p.path,
+       p.file_sha, pc.requires_ack, gc.score, gc.acked_by, gc.acked_at
+  FROM gate_clause gc
+  JOIN policy_clause pc ON pc.id = gc.clause_id
+  JOIN policy p ON p.id = pc.policy_id;
+
+DROP TABLE gate_clause;
+ALTER TABLE gate_clause_m18 RENAME TO gate_clause;
+CREATE INDEX gate_clause_gate_idx ON gate_clause(gate_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: 1,
@@ -1009,5 +1065,10 @@ export const MIGRATIONS: readonly Migration[] = [
     id: 17,
     name: 'F1 — verified fix patterns, the evidence one lane hands another',
     sql: M017_FIX_PATTERN + retrievalTriggers('fix_pattern'),
+  },
+  {
+    id: 18,
+    name: 'F4 — gate clauses snapshot the citation, so a policy reload cannot erase the audit',
+    sql: M018_GATE_CLAUSE_SNAPSHOT,
   },
 ];

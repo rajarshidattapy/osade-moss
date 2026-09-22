@@ -372,7 +372,8 @@ export class Gates {
 
   #currentClausesHash(gateId: string): string {
     const rows = this.#db
-      .prepare('SELECT hunk_ref, clause_id FROM gate_clause WHERE gate_id = ?')
+      // Unbound rows leave the hash: that is how a policy edit voids an unexecuted approval.
+      .prepare('SELECT hunk_ref, clause_id FROM gate_clause WHERE gate_id = ? AND unbound_at IS NULL')
       .all(gateId) as { hunk_ref: string; clause_id: string }[];
     return hashClauses(rows.map((row) => ({ hunkRef: row.hunk_ref, clauseId: row.clause_id })));
   }
@@ -390,9 +391,8 @@ export class Gates {
   #assertAcked(gateId: string): void {
     const row = this.#db
       .prepare(
-        `SELECT COUNT(*) AS n FROM gate_clause gc
-           JOIN policy_clause pc ON pc.id = gc.clause_id
-          WHERE gc.gate_id = ? AND pc.requires_ack = 1 AND gc.acked_at IS NULL`,
+        `SELECT COUNT(*) AS n FROM gate_clause
+          WHERE gate_id = ? AND requires_ack = 1 AND acked_at IS NULL AND unbound_at IS NULL`,
       )
       .get(gateId) as { n: number } | undefined;
     const outstanding = row?.n ?? 0;

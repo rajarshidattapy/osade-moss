@@ -52,6 +52,7 @@ export const ROLE_MATRIX: Readonly<Record<string, RequiredRole>> = {
   retrievalStats: 'viewer',
   contextPackGet: 'viewer',
   contextPackLatest: 'viewer',
+  migrationList: 'viewer',
   migrationView: 'viewer',
   migrationMetrics: 'viewer',
   migrationMisses: 'viewer',

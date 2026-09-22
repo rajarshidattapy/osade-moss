@@ -39,6 +39,22 @@ function portFilePath(): string {
   return join(root, 'daemon.port');
 }
 
+/**
+ * §M.6.2 — the host token the daemon writes beside its port.
+ *
+ * Absent is fine: a daemon from before F2, or `OSADE_DAEMON_URL` pointing somewhere else. With
+ * nobody invited the daemon does not ask for it anyway.
+ */
+function hostToken(): string | null {
+  if (process.env.OSADE_DAEMON_URL) return null;
+  try {
+    const root = process.env.OSADE_HOME ?? join(homedir(), '.osade');
+    return readFileSync(join(root, 'daemon.token'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export function daemonBaseUrl(): string {
   if (process.env.OSADE_DAEMON_URL) return process.env.OSADE_DAEMON_URL;
   let port: string;
@@ -61,9 +77,13 @@ async function call(kind: 'query' | 'mutation', path: string, input: unknown): P
       ? `${base}/${path}?input=${encodeURIComponent(JSON.stringify(input))}`
       : `${base}/${path}`;
 
+  const token = hostToken();
   const response = await fetch(url, {
     method: kind === 'query' ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     ...(kind === 'mutation' ? { body: JSON.stringify(input) } : {}),
   });
 

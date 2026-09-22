@@ -21,6 +21,7 @@ import {
   GateClauseView,
   MigrationChangeKind,
   MigrationMetrics,
+  MigrationSummary,
   MigrationView,
   PolicyReloadResult,
   MineStatus,
@@ -1447,6 +1448,10 @@ export const appRouter = t.router({
       guardMigration(() => requireMigrations(ctx).launchWave(input.migrationId, input.wave)),
     ),
 
+  migrationList: procedure
+    .output(z.array(MigrationSummary))
+    .query(({ ctx }) => requireMigrations(ctx).list()),
+
   migrationView: procedure
     .input(z.object({ migrationId: z.string() }))
     .output(MigrationView.nullable())
@@ -1527,12 +1532,14 @@ export const appRouter = t.router({
   /** §M.6.7 — presence is a heartbeat, so "is Priya here?" is derived, never a stored flag. */
   presenceBeat: procedure
     .input(z.object({ taskId: TaskId }))
-    .output(z.object({ present: z.array(z.string()) }))
+    .output(z.object({ present: z.array(z.string()), claimedBy: z.string().nullable() }))
     .mutation(({ ctx, input }) => {
       const members = requireMembers(ctx);
       const login = ctx.session?.login;
       if (login) members.beat(login, input.taskId);
-      return { present: members.presence(input.taskId) };
+      // The claim rides on the heartbeat so a window learns who is driving without a claim of
+      // its own — otherwise the only way to find out would be to try claiming.
+      return { present: members.presence(input.taskId), claimedBy: members.claimedBy(input.taskId) };
     }),
 
   /** §M.6.7 — advisory. It records who is driving; it does not lock the lane. */
@@ -1698,7 +1705,8 @@ export const appRouter = t.router({
     .input(z.object({ gateId: z.string(), clauseId: z.string() }))
     .output(GateClauseView)
     .mutation(({ ctx, input }) => {
-      requireClauses(ctx).ack(input.gateId, input.clauseId, 'human', ctx.now());
+      // §M.6.3 — the ack names whoever the server authenticated, like `decided_by` does.
+      requireClauses(ctx).ack(input.gateId, input.clauseId, ctx.session?.login ?? 'owner', ctx.now());
       return readGateClauses(ctx, input.gateId);
     }),
 
@@ -1775,14 +1783,12 @@ interface ClauseRow {
 function readGateClauses(ctx: DaemonContext, gateId: string): GateClauseView {
   const rows = ctx.db
     .prepare(
-      `SELECT gc.hunk_ref, gc.clause_id, gc.score, gc.acked_by, gc.acked_at,
-              pc.clause_ref, pc.title, pc.text, pc.requires_ack,
-              p.scope, p.path AS policy_path, p.file_sha
-         FROM gate_clause gc
-         JOIN policy_clause pc ON pc.id = gc.clause_id
-         JOIN policy p ON p.id = pc.policy_id
-        WHERE gc.gate_id = ?
-        ORDER BY gc.hunk_ref, pc.clause_ref`,
+      `SELECT hunk_ref, clause_id, score, acked_by, acked_at, clause_ref, title, text,
+              requires_ack, scope, policy_path, file_sha
+         FROM gate_clause
+        -- The card shows what binds the gate now; the audit export shows everything it showed.
+        WHERE gate_id = ? AND unbound_at IS NULL
+        ORDER BY hunk_ref, clause_ref`,
     )
     .all(gateId) as ClauseRow[];
 

@@ -136,14 +136,22 @@ export class GateClauses {
   /** Writes the rows for a gate that has just been created. */
   record(gateId: string, set: ClauseSet): void {
     if (set.matches.length === 0) return;
+    // Copied from the clause as it is now (M18): the gate keeps what it was shown even after the
+    // policy file changes. Selecting from `policy_clause` is also what keeps C1 — a clause id
+    // that does not exist inserts nothing, so there is no way to write an uncited row.
     const insert = this.#db.prepare(
-      `INSERT INTO gate_clause (gate_id, hunk_ref, clause_id, score)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO gate_clause
+         (gate_id, hunk_ref, clause_id, clause_ref, title, text, scope, policy_path, file_sha,
+          requires_ack, score)
+       SELECT ?, ?, pc.id, pc.clause_ref, pc.title, pc.text, p.scope, p.path, p.file_sha,
+              pc.requires_ack, ?
+         FROM policy_clause pc JOIN policy p ON p.id = pc.policy_id
+        WHERE pc.id = ?
        ON CONFLICT(gate_id, hunk_ref, clause_id) DO UPDATE SET score = excluded.score`,
     );
     this.#db.transaction(() => {
       for (const match of set.matches) {
-        insert.run(gateId, match.hunkRef, match.clauseId, match.score);
+        insert.run(gateId, match.hunkRef, match.score, match.clauseId);
       }
     })();
   }
@@ -158,9 +166,8 @@ export class GateClauses {
   outstandingAcks(gateId: string): number {
     const row = this.#db
       .prepare(
-        `SELECT COUNT(*) AS n FROM gate_clause gc
-           JOIN policy_clause pc ON pc.id = gc.clause_id
-          WHERE gc.gate_id = ? AND pc.requires_ack = 1 AND gc.acked_at IS NULL`,
+        `SELECT COUNT(*) AS n FROM gate_clause
+          WHERE gate_id = ? AND requires_ack = 1 AND acked_at IS NULL AND unbound_at IS NULL`,
       )
       .get(gateId) as { n: number };
     return row.n;

@@ -10,6 +10,8 @@ import { contextBridge, ipcRenderer } from 'electron';
  */
 contextBridge.exposeInMainWorld('osade', {
   daemonPort: (): Promise<number | null> => ipcRenderer.invoke('osade:daemon-port'),
+  /** §M.6.2 — proves this window is the host once teammates exist. */
+  daemonToken: (): Promise<string | null> => ipcRenderer.invoke('osade:daemon-token'),
   log: (message: string): void => {
     ipcRenderer.send('osade:log', message);
   },

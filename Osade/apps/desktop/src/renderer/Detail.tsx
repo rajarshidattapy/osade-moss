@@ -15,6 +15,7 @@ import { lanePhase, startingLine, type PendingLane } from './delivery.js';
 import { Files } from './Files.js';
 import { GateCard } from './GateCard.js';
 import { LaneTerminal } from './LaneTerminal.js';
+import { AttestationBadge, CatchUpPanel, ContextPackChip, LanePresence } from './LaneMoss.js';
 import {
   nextOpenedTerminal,
   retainLaneTerminal,
@@ -72,6 +73,7 @@ export function Detail({
   const [attachDismissed, setAttachDismissed] = useState(false);
   const [modHeld, setModHeld] = useState(false);
   const [branchOfferDismissed, setBranchOfferDismissed] = useState(false);
+  const [catchUpOpen, setCatchUpOpen] = useState(false);
   const focused = chat.lanes.find((t) => t.task.id === focusId) ?? chat.lanes[0]!;
   const rememberedTerminal = nextOpenedTerminal(openedTerminal, focused.task.id, chatSurface);
   if (rememberedTerminal !== openedTerminal) setOpenedTerminal(rememberedTerminal);
@@ -177,6 +179,20 @@ export function Detail({
           />
         </div>
         <LaneStrip chat={chat} focusId={focused.task.id} onFocus={onFocus} pending={pending} />
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            marginTop: 6,
+            minHeight: 0,
+            flexWrap: 'wrap',
+          }}
+        >
+          <AttestationBadge key={`att-${focused.task.id}`} taskId={focused.task.id} />
+          <span style={{ flex: 1 }} />
+          <LanePresence taskId={focused.task.id} />
+        </div>
       </header>
 
       {openGates.length > 0 ? (
@@ -339,10 +355,22 @@ export function Detail({
               active={chatSurface === 'terminal'}
               onClick={() => setChatSurface('terminal')}
             />
+            {chatSurface === 'chat' && (
+              <span style={{ marginLeft: 'auto' }}>
+                <FilterChip
+                  label="Catch up"
+                  active={catchUpOpen}
+                  onClick={() => setCatchUpOpen((open) => !open)}
+                />
+              </span>
+            )}
           </div>
         )}
         {lane === 'transcript' && chatSurface === 'chat' && (
           <>
+            {catchUpOpen && (
+              <CatchUpPanel key={chat.chatId} chatId={chat.chatId} onClose={() => setCatchUpOpen(false)} />
+            )}
             {chat.lanes.length > 1 && (
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
                 <FilterChip label="All" active={filter == null} onClick={() => setFilter(null)} />
@@ -380,6 +408,7 @@ export function Detail({
               followTaskId={focused.task.id}
               isolatedNotice={isolatedNotice}
             />
+            <ContextPackChip taskId={focused.task.id} turnKey={focused.turns?.length ?? 0} />
           </>
         )}
         {keepTerminal && (

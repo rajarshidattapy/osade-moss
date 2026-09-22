@@ -6,7 +6,29 @@
  * renderer never computes status.
  */
 
-import type { ConventionImpact, ConventionView, MineStatus } from '@osade/contract';
+import type {
+  AttestationCheck,
+  AuditRow,
+  CatchUpItem,
+  CatchUpResult,
+  ContextPack,
+  ConventionImpact,
+  ConventionView,
+  DiscoveryMiss,
+  GateClauseView,
+  Member,
+  MigrationChangeKind,
+  MigrationMetrics,
+  MigrationSummary,
+  MigrationView,
+  MineStatus,
+  Namespace,
+  PolicyReloadResult,
+  RetrievalStats,
+  Role,
+  ShareInfo,
+  TriageRow,
+} from '@osade/contract';
 
 let cachedBase: string | null = null;
 
@@ -26,9 +48,14 @@ async function call(kind: 'query' | 'mutation', path: string, input?: unknown): 
       ? `${root}/${path}${input === undefined ? '' : `?input=${encodeURIComponent(JSON.stringify(input))}`}`
       : `${root}/${path}`;
 
+  // Asked per call, not cached: a daemon restart mints a new token under the same window.
+  const token = (await window.osade?.daemonToken?.()) ?? null;
   const response = await fetch(url, {
     method: kind === 'query' ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     ...(kind === 'mutation' ? { body: JSON.stringify(input ?? {}) } : {}),
   });
 
@@ -346,4 +373,114 @@ export const api = {
       isolated: boolean;
       isolatedBecause?: { taskId: string; chatId: string; title: string };
     }>,
+  // ── OSADE-MOSS — retrieval, migrations, multiplayer, compliance ─────────────
+
+  /** §M.1.7 — which backend is answering, and why it is degraded if it is. */
+  retrievalStats: () => call('query', 'retrievalStats') as Promise<RetrievalStats>,
+
+  indexRebuild: (ns?: Namespace) =>
+    call('mutation', 'indexRebuild', ns ? { ns } : {}) as Promise<{ indexed: number }>,
+
+  contextPackLatest: (taskId: string) =>
+    call('query', 'contextPackLatest', { taskId }) as Promise<ContextPack | null>,
+
+  migrationList: () => call('query', 'migrationList') as Promise<MigrationSummary[]>,
+
+  migrationCreate: (input: {
+    provider: string;
+    package: string;
+    fromVersion?: string | null;
+    toVersion: string;
+    changelogText: string;
+  }) => call('mutation', 'migrationCreate', input) as Promise<{ migrationId: string }>,
+
+  migrationExtract: (migrationId: string) =>
+    call('mutation', 'migrationExtract', { migrationId }) as Promise<{ kept: number; dropped: number }>,
+
+  migrationAddChange: (input: {
+    migrationId: string;
+    kind: MigrationChangeKind;
+    oldSymbol?: string | null;
+    newSymbol?: string | null;
+    description: string;
+  }) => call('mutation', 'migrationAddChange', input) as Promise<{ changeId: string }>,
+
+  migrationChangesConfirm: (migrationId: string) =>
+    call('mutation', 'migrationChangesConfirm', { migrationId }) as Promise<{ ok: true }>,
+
+  migrationTargetsSet: (migrationId: string, repoIds: string[]) =>
+    call('mutation', 'migrationTargetsSet', { migrationId, repoIds }) as Promise<{ ok: true }>,
+
+  migrationChunk: (migrationId: string) =>
+    call('mutation', 'migrationChunk', { migrationId }) as Promise<{ chunks: number; unparsed: string[] }>,
+
+  migrationDiscover: (migrationId: string) =>
+    call('mutation', 'migrationDiscover', { migrationId }) as Promise<{ sites: number; queryMs: number }>,
+
+  migrationLaunchWave: (migrationId: string, wave: number) =>
+    call('mutation', 'migrationLaunchWave', { migrationId, wave }) as Promise<{
+      launched: string[];
+      deferred: string[];
+    }>,
+
+  migrationView: (migrationId: string) =>
+    call('query', 'migrationView', { migrationId }) as Promise<MigrationView | null>,
+
+  migrationMetrics: (migrationId: string) =>
+    call('query', 'migrationMetrics', { migrationId }) as Promise<MigrationMetrics>,
+
+  migrationMisses: (migrationId: string) =>
+    call('query', 'migrationMisses', { migrationId }) as Promise<DiscoveryMiss[]>,
+
+  shareInfo: () => call('query', 'shareInfo') as Promise<ShareInfo>,
+
+  memberList: () => call('query', 'memberList') as Promise<Member[]>,
+
+  memberInvite: (login: string, role: Exclude<Role, 'owner'>) =>
+    call('mutation', 'memberInvite', { login, role }) as Promise<{ ok: true }>,
+
+  memberSetRole: (login: string, role: Exclude<Role, 'owner'>) =>
+    call('mutation', 'memberSetRole', { login, role }) as Promise<{ ok: true }>,
+
+  memberRemove: (login: string) =>
+    call('mutation', 'memberRemove', { login }) as Promise<{ ok: true }>,
+
+  /** §M.6.7 — a heartbeat; the reply is who else is on this lane right now. */
+  presenceBeat: (taskId: string) =>
+    call('mutation', 'presenceBeat', { taskId }) as Promise<{ present: string[]; claimedBy: string | null }>,
+
+  taskClaim: (taskId: string) =>
+    call('mutation', 'taskClaim', { taskId }) as Promise<{ claimedBy: string | null }>,
+
+  taskRelease: (taskId: string) =>
+    call('mutation', 'taskRelease', { taskId }) as Promise<{ claimedBy: string | null }>,
+
+  catchUp: (chatId: string) => call('query', 'catchUp', { chatId }) as Promise<CatchUpResult>,
+
+  askHistory: (chatId: string, question: string) =>
+    call('query', 'askHistory', { chatId, question }) as Promise<CatchUpItem[]>,
+
+  attestationGet: (taskId: string) =>
+    call('query', 'attestationGet', { taskId }) as Promise<{
+      head_sha: string;
+      approved_by: string;
+      approved_at: string;
+      tier: number;
+    } | null>,
+
+  attestationVerify: (input: { body: string; currentHead: string; attestorsJson?: string }) =>
+    call('query', 'attestationVerify', input) as Promise<AttestationCheck>,
+
+  prSignals: (repoId: string) => call('query', 'prSignals', { repoId }) as Promise<TriageRow[]>,
+
+  auditExport: (input: { since: number; until?: number; repoId?: string }) =>
+    call('query', 'auditExport', input) as Promise<AuditRow[]>,
+
+  policyReload: () => call('mutation', 'policyReload') as Promise<PolicyReloadResult>,
+
+  gateClauses: (gateId: string) =>
+    call('query', 'gateClauses', { gateId }) as Promise<GateClauseView>,
+
+  gateClauseAck: (gateId: string, clauseId: string) =>
+    call('mutation', 'gateClauseAck', { gateId, clauseId }) as Promise<GateClauseView>,
 };

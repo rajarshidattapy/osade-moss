@@ -14,6 +14,8 @@ that directory unless stated otherwise.
 | Signed PR evidence | `osade attest verify` | An approval is tied to the approved commit and is reported as valid, stale, absent, or invalid. |
 | Policy and audit evidence | `osade policy …`, `osade audit export` | Versioned policy clauses on gates, explicit acknowledgements, and exportable decision evidence. |
 
+Every row also has a desktop surface — see [In the desktop app](#in-the-desktop-app).
+
 The terminal commands use the same daemon procedures as the desktop application. A
 Moss project is optional: without `MOSS_PROJECT_ID` and `MOSS_PROJECT_KEY`, retrieval
 uses the built-in FTS5 backend and remains fully testable.
@@ -157,12 +159,92 @@ To verify a PR attestation, save its body to a file and compare it with the curr
 osade attest verify .\pr-body.md (git rev-parse HEAD)
 ```
 
+The audit keeps the clauses a gate was shown even after the policy file is edited or
+deleted: each gate stores its own copy of the citation (migration 18). To check, approve a
+gate that cited a clause, edit or delete the policy file, run `osade policy reload`, and
+confirm `osade audit export` still lists the clause and its ack. A gate that has *not*
+executed yet is unbound instead, so its approval fails the re-hash rather than running
+against rewritten policy.
+
 Export the recorded gate evidence as JSON Lines (default) or CSV:
 
 ```powershell
 osade audit export --since 2026-01-01
 osade audit export --since 2026-01-01 --format csv
 ```
+
+## In the desktop app
+
+Start the app against the same throwaway home so it adopts the daemon you already started:
+
+```powershell
+$env:OSADE_HOME = Join-Path $env:TEMP 'osade-moss-manual-test'
+pnpm.cmd --filter @osade/desktop start
+```
+
+**Workspace panel.** The sidebar foot has a **Retrieval** row showing the live backend, and
+clicking it (or the **Workspace** row under it) opens a panel with five tabs:
+
+| Tab | What to check |
+| --- | --- |
+| Retrieval | Backend is `Local (FTS5)` without Moss credentials, `Moss` with them, `Degraded · FTS5` with the reason when Moss is configured but failing. Per-namespace docs, queries, p50/p95, and indexer lag. **Rebuild index** re-projects from SQLite and reports the count. |
+| Migrations | **New migration** takes provider, package, versions and a pasted changelog. The detail view walks the same steps as the CLI walkthrough above: add or extract changes, **Confirm changes** (targets, chunking and discovery stay disabled until then), tick target repos, **Parse and chunk**, **Discover**. Discovery shows a both / retrieval-only / grep-only table and bar per repo. **Launch wave N** is only enabled for the next wave, and wave 1+ waits for a green canary. The digest A/B table and discovery misses appear once lanes have run. |
+| Team | Listening mode, join code and TLS fingerprint in LAN mode, the member list with role changes and removal, and an invite form. The owner row cannot be changed. |
+| Pull requests | Pick a repo to see the triage list (attested → unique → near-duplicates) with attestation state and similar PRs. **Check an attestation** takes a PR body and head sha and reports valid, stale (approved an earlier commit, not forged), invalid, or absent. |
+| Policies & audit | **Reload policies** shows policies / clauses / removed. **Download .jsonl** exports the audit rows for the last N days, optionally for one repo — the same bytes as `osade audit export`. |
+
+**On a gate card.** When a gate's diff touches a policy clause, the card lists each clause
+with its ref, title, text, source file and file hash. A `requires_ack` clause has a checkbox;
+**Approve** (and **Approve edited**) stay disabled until every such clause is acknowledged,
+and the acknowledgement names who made it. The daemon refuses the approval regardless of the
+button, so the Enter shortcut cannot skip it.
+
+**On a lane.**
+- Below the transcript, a **Context** chip shows the pack sent with the latest turn — item
+  count, tokens, backend, and whether it was degraded. Click it to see every cited item with
+  its namespace, source row and score.
+- **Catch up** (next to the Chat / Terminal switch) lists what happened in the chat since you
+  last looked. Items marked `●` were included by exact filter (gate decisions, verify failures)
+  rather than by ranking. The box underneath asks the chat's history and returns cited hits.
+- Under the lane strip, an attested lane shows `✓ attested <sha> · <login>`. Once teammates
+  exist, the same row shows who is on the lane and a **Claim** / **Driving: … · release**
+  button. The claim is advisory; it does not lock the lane.
+
+**Owner access once teammates exist.** The daemon writes a fresh host token to
+`$OSADE_HOME/daemon.token` at every boot. The desktop app and the `osade` CLI present it, which
+is how they stay the owner after someone is invited. Anonymous requests are still refused. To
+check: invite someone from the Team tab, then confirm the app keeps working and
+`osade task list` still answers. The raw `Invoke-RestMethod` helper in the migration
+walkthrough sends no token, so it only works while nobody is invited — add
+`-Headers @{ Authorization = "Bearer $((Get-Content (Join-Path $env:OSADE_HOME 'daemon.token')).Trim())" }`
+after that.
+
+The same surfaces can be exercised with the smoke harness. It boots the real window against a
+seeded throwaway home, runs a sequence of clicks (`>>` between selectors), writes a screenshot,
+and fails if any expected phrase is not visible. The seed adds a gate with two policy clauses
+(one `requires_ack`) and a context pack. Use an absolute `OSADE_HOME`: the global policy is keyed
+by its path, and a relative home would make the daemon see a different file at boot.
+
+```powershell
+cd apps/desktop
+pnpm.cmd --filter @osade/daemon build; pnpm.cmd build
+$env:OSADE_HOME = (Resolve-Path .smoke).Path
+pnpm.cmd --filter @osade/daemon exec vite-node scripts/seed-smoke-fixture.mjs $env:OSADE_HOME
+$env:OSADE_SMOKE_SHOT = 'smoke-moss.png'
+
+# Workspace panel (click "Not now" first on a fresh home: '[data-github-skip] >> ...')
+$env:OSADE_SMOKE_CLICK = '[data-open-workspace]'
+$env:OSADE_SMOKE_EXPECT = 'Backend|Indexer lag|Rebuild index|Migrations|Pull requests'
+npx electron .
+
+# Gate clauses: Approve is held, the ack releases it
+$env:OSADE_SMOKE_CLICK = '[data-task-id] >> [data-ack]'
+$env:OSADE_SMOKE_EXPECT = 'SEC-3.2|Acknowledged by owner|Context · 1 item'
+npx electron .
+```
+
+`apps/desktop/.smoke` is committed, so restore it afterwards with
+`git checkout -- apps/desktop/.smoke` and delete the untracked files the run leaves there.
 
 ## Multiplayer status
 

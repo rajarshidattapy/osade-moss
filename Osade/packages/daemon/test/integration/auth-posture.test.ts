@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -277,4 +277,48 @@ describe('§M.6.2 — the websocket closes before the snapshot', () => {
     expect(result.sawMessage).toBe(false);
     expect(result.closed).toBe(4401);
   });
+
+  it('accepts the host token, so the owner window is not locked out', async () => {
+    const result = await connect(`?token=${encodeURIComponent(hostToken())}`);
+    expect(result.sawMessage).toBe(true);
+  });
 });
+
+/**
+ * The bug: once anyone was invited, the desktop window and the CLI — which never sent a token,
+ * because on a single-user loopback daemon there was nothing to send — got UNAUTHORIZED from
+ * their own daemon. The host token is how they prove they are the owner without an exchange.
+ */
+describe('§M.6.2 — the host token', () => {
+  it('makes the caller the owner', async () => {
+    const result = await call('memberInvite', {
+      method: 'POST',
+      token: hostToken(),
+      input: { login: 'mallory', role: 'viewer' },
+    });
+    expect(result.body.error).toBeUndefined();
+    expect(members.get('mallory')?.role).toBe('viewer');
+  });
+
+  it('acts as the owner login, so decided_by names a real person', async () => {
+    const claim = await call('taskClaim', { method: 'POST', token: hostToken(), input: { taskId: 't1' } });
+    expect(dataOf<{ claimedBy: string }>(claim.body).claimedBy).toBe('alice');
+  });
+
+  it('is not a session a logout can revoke', async () => {
+    await call('authLogout', { method: 'POST', token: hostToken() });
+    const listed = await call('taskList', { token: hostToken() });
+    expect(listed.body.error).toBeUndefined();
+  });
+
+  it('is only accepted verbatim', async () => {
+    const token = hostToken();
+    const tampered = `${token.slice(0, -1)}${token.endsWith('A') ? 'B' : 'A'}`;
+    const result = await call('taskList', { token: tampered });
+    expect(errorCode(result.body)).toBe('UNAUTHORIZED');
+  });
+});
+
+function hostToken(): string {
+  return readFileSync(join(home, 'daemon.token'), 'utf8').trim();
+}

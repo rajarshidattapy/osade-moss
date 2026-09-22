@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -18,7 +18,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Attestations } from '../attest/service.js';
 import type { CatchUp } from './catch-up.js';
 import { loadTls, resolveBindAddress, type ListenMode } from './listen.js';
-import type { Members } from './members.js';
+import type { Members, Session } from './members.js';
 import type { PrSignals } from '../scm/signals.js';
 import type { GateClauses } from '../domain/gate-clauses.js';
 import type { MigrationService } from '../domain/migration.js';
@@ -135,11 +135,17 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
    * That is the whole of §M.6.3: `decided_by` is only worth anything if the identity behind it
    * was established by the server. A client that could name itself could approve as anyone.
    */
+  const hostToken = randomBytes(32).toString('base64url');
+  const sessionFor = (token: string | null): Session | null =>
+    isHostToken(token, hostToken) ? hostSession(options.members) : (options.members?.resolve(token) ?? null);
+
   const contextFor = (req: IncomingMessage): DaemonContext => {
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') === true ? header.slice(7) : null;
-    const session = options.members?.resolve(token) ?? null;
-    return { ...context, session, sessionToken: token };
+    // The host token is not a member session: logging it out would lock the owner out of
+    // their own daemon until the next boot, so it never reaches `sessionToken`.
+    const host = isHostToken(token, hostToken);
+    return { ...context, session: sessionFor(token), sessionToken: host ? null : token };
   };
 
   const trpcHandler = createHTTPHandler({
@@ -151,7 +157,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
     // The renderer is a file:// origin under Electron, so CORS is permissive — but only
     // loopback can reach this listener at all, which is the actual boundary (§2.1).
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization');
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
       return;
@@ -173,7 +179,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
     // polite error attached.
     if (options.members && options.members.list().length > 0) {
       const token = new URL(req.url ?? '/', 'http://x').searchParams.get('token');
-      if (!options.members.resolve(token)) {
+      if (!sessionFor(token)) {
         socket.close(4401, 'auth_expired');
         return;
       }
@@ -205,6 +211,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
   const paths = osadePaths();
   mkdirSync(dirname(paths.portFile), { recursive: true });
   writeFileSync(paths.portFile, String(port));
+  // 0600: the token is exactly as private as the database next to it. (Windows ignores the
+  // mode; there the profile directory's ACL is what keeps other users out.)
+  writeFileSync(paths.tokenFile, hostToken, { mode: 0o600 });
   writeFileSync(paths.pidFile, String(process.pid));
 
   // §5.4 — retain the last 50k change_log rows; prune on a timer.
@@ -231,9 +240,21 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<R
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => http.close(() => resolve()));
       rmSync(paths.portFile, { force: true });
+      rmSync(paths.tokenFile, { force: true });
       rmSync(paths.pidFile, { force: true });
     },
   };
+}
+
+function isHostToken(token: string | null, hostToken: string): boolean {
+  if (!token || token.length !== hostToken.length) return false;
+  return timingSafeEqual(Buffer.from(token), Buffer.from(hostToken));
+}
+
+/** The host acts as the owner row when there is one, so `decided_by` names a real login. */
+function hostSession(members: Members | null | undefined): Session {
+  const owner = members?.list().find((member) => member.role === 'owner');
+  return { login: owner?.login ?? 'owner', role: 'owner' };
 }
 
 function listen(server: Server, port: number, address: string): Promise<number> {
